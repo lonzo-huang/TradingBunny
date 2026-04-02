@@ -1,0 +1,6 @@
+# requirements.txt
+nautilus_trader>=1.200.0
+aiohttp>=3.9.0
+websockets>=12.0
+python-dotenv>=1.0.0
+redis>=5.0.0

@@ -64,9 +64,9 @@ class PolymarketStrategy(Strategy):
             'Unrealized PnL per position',
             ['token_type']
         )
-        self.realized_pnl_counter = Counter(
-            'polymarket_realized_pnl_total',
-            'Total realized PnL',
+        self.realized_pnl_gauge = Gauge(
+            'polymarket_realized_pnl',
+            'Realized PnL per position (can be negative)',
             ['token_type']
         )
 
@@ -629,6 +629,6 @@ class PolymarketStrategy(Strategy):
         )
         # 更新 PNL 指标
         token_type = 'up' if self.instrument and event.instrument_id == self.instrument.id else 'down'
-        self.realized_pnl_counter.labels(token_type=token_type).inc(float(event.realized_pnl))
+        self.realized_pnl_gauge.labels(token_type=token_type).set(float(event.realized_pnl))
         self.unrealized_pnl_gauge.labels(token_type=token_type).set(0)
         self.position_size_gauge.labels(token_type=token_type).set(0)

@@ -35,12 +35,12 @@
       "targets": [
         {
           "expr": "polymarket_price{token_type=\"up\"}",
-          "legendFormat": "Up Price",
+          "legendFormat": "Up {{price_type}}",
           "refId": "A"
         },
         {
           "expr": "polymarket_price{token_type=\"down\"}",
-          "legendFormat": "Down Price",
+          "legendFormat": "Down {{price_type}}",
           "refId": "B"
         }
       ],
@@ -60,7 +60,7 @@
       "targets": [
         {
           "expr": "polymarket_unrealized_pnl",
-          "legendFormat": "Unrealized",
+          "legendFormat": "{{token_type}}",
           "refId": "A"
         }
       ],
@@ -87,7 +87,7 @@
       "targets": [
         {
           "expr": "polymarket_realized_pnl_total",
-          "legendFormat": "Realized",
+          "legendFormat": "{{token_type}}",
           "refId": "A"
         }
       ],
@@ -114,7 +114,7 @@
       "targets": [
         {
           "expr": "polymarket_position_size",
-          "legendFormat": "Size",
+          "legendFormat": "{{token_type}}",
           "refId": "A"
         }
       ],

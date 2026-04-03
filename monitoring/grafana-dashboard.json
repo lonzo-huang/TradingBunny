@@ -135,7 +135,7 @@
       "targets": [
         {
           "expr": "rate(polymarket_orders_total[5m])",
-          "legendFormat": "{{side}}",
+          "legendFormat": "{{token_type}}-{{side}}",
           "refId": "A"
         }
       ]
@@ -149,7 +149,7 @@
       "targets": [
         {
           "expr": "rate(polymarket_filled_orders_total[5m])",
-          "legendFormat": "{{side}}",
+          "legendFormat": "{{token_type}}-{{side}}",
           "refId": "A"
         }
       ]
@@ -163,7 +163,7 @@
       "targets": [
         {
           "expr": "polymarket_position_entry_price",
-          "legendFormat": "Entry Price",
+          "legendFormat": "{{token_type}}",
           "refId": "A"
         }
       ],
@@ -182,7 +182,7 @@
       "targets": [
         {
           "expr": "rate(polymarket_ticks_total[1m])",
-          "legendFormat": "Ticks/sec",
+          "legendFormat": "{{token_type}}",
           "refId": "A"
         }
       ]

@@ -27,7 +27,10 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-storage:/var/lib/grafana
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana-dashboard.json:/var/lib/grafana/dashboards/polymarket.json:ro
+      - ./pde-dashboard.json:/var/lib/grafana/dashboards/pde.json:ro
     networks:
       - monitoring
     depends_on:

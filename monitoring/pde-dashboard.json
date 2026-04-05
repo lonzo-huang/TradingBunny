@@ -4,7 +4,7 @@
   "tags": ["polymarket", "pde", "trading", "dual-phase"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": {
     "from": "now-6h",
@@ -26,34 +26,28 @@
     ]
   },
   "panels": [
+
+    { "id": 100, "type": "row", "title": "📊 Overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false },
+
     {
       "id": 1,
       "title": "Strategy Phase",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "targets": [
-        {
-          "expr": "pde_strategy_state",
-          "legendFormat": "Phase",
-          "refId": "A"
-        }
-      ],
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [{ "expr": "pde_strategy_state", "legendFormat": "Phase", "refId": "A" }],
       "fieldConfig": {
         "defaults": {
-          "mappings": [
-            { "type": "value", "value": "0", "text": "Idle" },
-            { "type": "value", "value": "1", "text": "Phase A (EV)" },
-            { "type": "value", "value": "2", "text": "Phase B (Tail)" }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "gray", "value": 0 },
-              { "color": "blue", "value": 1 },
-              { "color": "orange", "value": 2 }
-            ]
-          }
+          "mappings": [{ "type": "value", "options": {
+            "0": { "text": "Idle", "color": "gray", "index": 0 },
+            "1": { "text": "Phase A (EV)", "color": "blue", "index": 1 },
+            "2": { "text": "Phase B (Tail)", "color": "orange", "index": 2 }
+          }}],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "gray", "value": null },
+            { "color": "blue", "value": 1 },
+            { "color": "orange", "value": 2 }
+          ]}
         }
       }
     },
@@ -62,268 +56,239 @@
       "title": "Remaining Time",
       "type": "gauge",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "targets": [
-        {
-          "expr": "pde_remaining_time",
-          "legendFormat": "Seconds",
-          "refId": "A"
-        }
-      ],
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "targets": [{ "expr": "pde_remaining_time", "legendFormat": "Seconds", "refId": "A" }],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "max": 300,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": 0 },
-              { "color": "orange", "value": 60 },
-              { "color": "yellow", "value": 120 },
-              { "color": "green", "value": 180 }
-            ]
-          }
+          "unit": "s", "max": 300, "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": 0 },
+            { "color": "orange", "value": 60 },
+            { "color": "yellow", "value": 120 },
+            { "color": "green", "value": 180 }
+          ]}
         }
       }
     },
     {
       "id": 3,
-      "title": "Delta P (Price Offset)",
+      "title": "BTC Spot Price",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "targets": [
-        {
-          "expr": "pde_delta_p",
-          "legendFormat": "{{token_type}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 2
-        }
-      }
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 1 },
+      "targets": [{ "expr": "pde_btc_price", "legendFormat": "BTC/USDT", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 } }
     },
     {
       "id": 4,
-      "title": "Phase A: Theoretical Probability (p_up)",
+      "title": "BTC Delta P (USD)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "targets": [
-        {
-          "expr": "pde_p_up",
-          "legendFormat": "{{token_type}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "max": 1,
-          "min": 0
-        }
-      }
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 1 },
+      "targets": [{ "expr": "pde_btc_delta_p", "legendFormat": "BTC ΔP", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 } }
     },
+
     {
       "id": 5,
-      "title": "Phase A: Expected Value (EV)",
-      "type": "timeseries",
+      "title": "Cumulative Trades",
+      "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 5 },
       "targets": [
-        {
-          "expr": "pde_ev",
-          "legendFormat": "{{token_type}}-{{side}}",
-          "refId": "A"
-        }
+        { "expr": "pde_phase_a_trades_cumulative_total", "legendFormat": "Phase A", "refId": "A" },
+        { "expr": "pde_phase_b_trades_cumulative_total", "legendFormat": "Phase B", "refId": "B" }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 4
-        }
-      }
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0,
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }
+        ]}
+      }},
+      "options": { "graphMode": "area", "colorMode": "background_solid", "textMode": "value_and_name" }
     },
     {
       "id": 6,
-      "title": "Phase A: Volatility (Sigma)",
-      "type": "timeseries",
+      "title": "Rounds Completed",
+      "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
-      "targets": [
-        {
-          "expr": "pde_sigma",
-          "legendFormat": "Sigma",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 6
-        }
-      }
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 5 },
+      "targets": [{ "expr": "pde_rounds_total_total", "legendFormat": "Rounds", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0,
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "purple", "value": null }
+        ]}
+      }},
+      "options": { "graphMode": "none", "colorMode": "background_solid" }
     },
     {
       "id": 7,
-      "title": "Phase B: Flip Probability",
+      "title": "Cumulative Trades Over Time",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 5 },
       "targets": [
-        {
-          "expr": "pde_p_flip",
-          "legendFormat": "{{token_type}}",
-          "refId": "A"
-        }
+        { "expr": "pde_phase_a_trades_cumulative_total", "legendFormat": "Phase A", "refId": "A" },
+        { "expr": "pde_phase_b_trades_cumulative_total", "legendFormat": "Phase B", "refId": "B" },
+        { "expr": "pde_rounds_total_total", "legendFormat": "Rounds", "refId": "C" }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "max": 1,
-          "min": 0
-        }
-      }
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } }
     },
-    {
-      "id": 8,
-      "title": "Phase B: Tail EV",
-      "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
-      "targets": [
-        {
-          "expr": "pde_ev_tail",
-          "legendFormat": "{{token_type}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 4
-        }
-      }
-    },
-    {
-      "id": 9,
-      "title": "Phase A Trades Count",
-      "type": "stat",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 20 },
-      "targets": [
-        {
-          "expr": "pde_phase_a_trades",
-          "legendFormat": "Trades",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 2 }
-            ]
-          }
-        }
-      }
-    },
+
+    { "id": 101, "type": "row", "title": "🔵 Phase A — EV Arbitrage (0-240s)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "collapsed": false },
+
     {
       "id": 10,
-      "title": "Total Trades by Phase",
+      "title": "Theoretical Probability (p_up)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
-      "targets": [
-        {
-          "expr": "rate(pde_trades_total[5m])",
-          "legendFormat": "{{phase}}-{{token_type}}-{{side}}",
-          "refId": "A"
-        }
-      ]
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 6 },
+      "targets": [{ "expr": "pde_p_up", "legendFormat": "{{token_type}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } }
     },
     {
       "id": 11,
-      "title": "Unrealized PnL",
-      "type": "stat",
+      "title": "Expected Value (EV)",
+      "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 20 },
-      "targets": [
-        {
-          "expr": "pde_unrealized_pnl",
-          "legendFormat": "{{token_type}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 0 }
-            ]
-          }
-        }
-      }
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 6 },
+      "targets": [{ "expr": "pde_ev", "legendFormat": "{{token_type}}-{{side}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 4 } }
     },
     {
       "id": 12,
-      "title": "Realized PnL",
+      "title": "Volatility (Sigma)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
+      "targets": [{ "expr": "pde_sigma", "legendFormat": "Sigma", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 6 } }
+    },
+    {
+      "id": 13,
+      "title": "Phase A Trades (this round)",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 24 },
-      "targets": [
-        {
-          "expr": "pde_realized_pnl",
-          "legendFormat": "{{token_type}}",
-          "refId": "A"
-        }
-      ],
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 14 },
+      "targets": [{ "expr": "pde_phase_a_trades", "legendFormat": "Trades", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": 0 }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 }
+      ]}}}
+    },
+    {
+      "id": 14,
+      "title": "Phase A Trade Rate",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 8, "x": 4, "y": 14 },
+      "targets": [{ "expr": "rate(pde_trades_total{phase=\"A\"}[5m])", "legendFormat": "A-{{token_type}}-{{side}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 4 } }
+    },
+    {
+      "id": 15,
+      "title": "Delta P (Token Price Offset)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 14 },
+      "targets": [{ "expr": "pde_delta_p", "legendFormat": "{{token_type}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 2 } }
+    },
+
+    { "id": 102, "type": "row", "title": "🟠 Phase B — Tail Continuation (240-300s)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }, "collapsed": false },
+
+    {
+      "id": 20,
+      "title": "Flip Probability",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "targets": [{ "expr": "pde_p_flip", "legendFormat": "{{token_type}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } }
+    },
+    {
+      "id": 21,
+      "title": "Tail EV",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "targets": [{ "expr": "pde_ev_tail", "legendFormat": "{{token_type}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 4 } }
+    },
+    {
+      "id": 22,
+      "title": "Phase B Trade Rate",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "targets": [{ "expr": "rate(pde_trades_total{phase=\"B\"}[5m])", "legendFormat": "B-{{token_type}}-{{side}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 4 } }
+    },
+
+    { "id": 103, "type": "row", "title": "💼 Position Management (TP/SL)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 }, "collapsed": false },
+
+    {
+      "id": 30,
+      "title": "Position PnL %",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "targets": [{ "expr": "pde_position_pnl_pct", "legendFormat": "{{token_type}}", "refId": "A" }],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 0 }
-            ]
-          }
+          "unit": "percentunit", "decimals": 1,
+          "custom": { "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": -0.20 },
+            { "color": "transparent", "value": -0.19 },
+            { "color": "transparent", "value": 0.29 },
+            { "color": "green", "value": 0.30 }
+          ]}
         }
       }
     },
     {
-      "id": 13,
+      "id": 31,
+      "title": "TP / SL / Expire Count",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "targets": [{ "expr": "pde_tp_sl_total", "legendFormat": "{{token_type}}-{{trigger}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 } }
+    },
+    {
+      "id": 32,
       "title": "Position Size",
       "type": "gauge",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
-      "targets": [
-        {
-          "expr": "pde_position_size",
-          "legendFormat": "{{token_type}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "max": 200,
-          "min": 0
-        }
-      }
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 36 },
+      "targets": [{ "expr": "pde_position_size", "legendFormat": "{{token_type}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "max": 500, "min": 0 } }
+    },
+    {
+      "id": 33,
+      "title": "Unrealized PnL",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 36 },
+      "targets": [{ "expr": "pde_unrealized_pnl", "legendFormat": "{{token_type}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2,
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red", "value": null }, { "color": "green", "value": 0 }
+        ]}
+      }}
+    },
+    {
+      "id": 34,
+      "title": "Realized PnL",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 36 },
+      "targets": [{ "expr": "pde_realized_pnl", "legendFormat": "{{token_type}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2,
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red", "value": null }, { "color": "green", "value": 0 }
+        ]}
+      }}
     }
+
   ]
 }

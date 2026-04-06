@@ -147,7 +147,7 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     "market_interval_minutes": 5,
                     "trade_amount_usd": 100.0,
                     "auto_rollover": True,
-                    "ev_threshold_A": 0.05,
+                    "ev_threshold_A": 0.15,
                     "max_A_trades": 2,
                     "take_profit_pct": 0.30,
                     "stop_loss_pct": 0.20,

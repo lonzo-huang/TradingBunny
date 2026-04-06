@@ -61,6 +61,9 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     flip_stats_path: str = "config/flip_stats.json"
     flip_stats_lookback: str = "24h"  # Binance lookback: 12h, 24h, 3d, 1w, 2w, 30d
     flip_stats_refresh_minutes: int = 60  # Re-compute flip stats every N minutes (0=disable)
+    
+    # Debug mode
+    debug_raw_data: bool = False  # Print raw market data for debugging
 
 
 class PolymarketPDEStrategy(Strategy):
@@ -681,7 +684,7 @@ class PolymarketPDEStrategy(Strategy):
         # ── Staleness watchdog: detect WS drop and force resubscribe ──
         now_ts = self.clock.timestamp()
         if (self.last_quote_tick_ts > 0
-                and (now_ts - self.last_quote_tick_ts) > 30
+                and (now_ts - self.last_quote_tick_ts) > 90
                 and self._resubscribe_attempts < 3):
             self._resubscribe_attempts += 1
             self.log.warning(
@@ -793,6 +796,16 @@ class PolymarketPDEStrategy(Strategy):
         if self.btc_start_price is not None:
             btc_delta = self.btc_price - self.btc_start_price
             self.btc_delta_p_gauge.set(btc_delta)
+        
+        # Debug: Print BTC data
+        if self.config.debug_raw_data:
+            move_bps = (self.btc_price - self.btc_anchor_price) / self.btc_anchor_price * 10000 if self.btc_anchor_price else 0
+            delta_pct = (self.btc_price - self.btc_start_price) / self.btc_start_price * 100 if self.btc_start_price else 0
+            self.log.info(
+                f"[DEBUG] BTC | Price={self.btc_price:.2f} | "
+                f"Move={move_bps:+.1f}bps | Delta={delta_pct:+.2f}% | "
+                f"Size={float(tick.size):.2f} | Ts={tick.ts_event}"
+            )
 
     # ── Quote tick processing ──────────────────────────────────────────────
 
@@ -801,6 +814,21 @@ class PolymarketPDEStrategy(Strategy):
         self.last_quote_tick_ts = self.clock.timestamp()
         self.poly_last_tick_wall_ts = self.last_quote_tick_ts
         self._resubscribe_attempts = 0  # reset on any live tick
+        
+        # Debug: Print raw data
+        if self.config.debug_raw_data:
+            token_type = "UP" if self.instrument and tick.instrument_id == self.instrument.id else "DOWN" if self.down_instrument and tick.instrument_id == self.down_instrument.id else "UNKNOWN"
+            bid_price = float(tick.bid_price)
+            ask_price = float(tick.ask_price)
+            mid_price = (bid_price + ask_price) / 2.0
+            spread = ask_price - bid_price
+            spread_pct = (spread / ask_price) * 100 if ask_price > 0 else 0
+            self.log.info(
+                f"[DEBUG] {token_type} | Bid={bid_price:.4f} | Ask={ask_price:.4f} | "
+                f"Mid={mid_price:.4f} | Spread={spread_pct:.2f}% | "
+                f"Size={float(tick.bid_size):.0f}/{float(tick.ask_size):.0f} | "
+                f"Ts={tick.ts_event}"
+            )
         
         # Track latency gap: positive = Binance data is fresher (speed advantage)
         if self.btc_last_tick_wall_ts > 0:

@@ -161,6 +161,7 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     "flip_stats_path": "config/flip_stats.json",
                     "flip_stats_lookback": "24h",
                     "flip_stats_refresh_minutes": 60,
+                    "debug_raw_data": True,
                     "order_id_tag": "002",
                 },
             ),

@@ -15,6 +15,7 @@ from collections import deque
 import json
 import math
 import os
+import threading
 
 import numpy as np
 from scipy.stats import norm
@@ -58,6 +59,8 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     
     # Flip stats config
     flip_stats_path: str = "config/flip_stats.json"
+    flip_stats_lookback: str = "24h"  # Binance lookback: 12h, 24h, 3d, 1w, 2w, 30d
+    flip_stats_refresh_minutes: int = 60  # Re-compute flip stats every N minutes (0=disable)
 
 
 class PolymarketPDEStrategy(Strategy):
@@ -118,14 +121,17 @@ class PolymarketPDEStrategy(Strategy):
         self.btc_start_price: float | None = None
         self.btc_price_history: deque = deque(maxlen=3000)  # ~30-60s of Binance ticks
         
-        # Load flip stats
-        self.flip_stats = self._load_flip_stats()
+        # Load flip stats (initial from file, then dynamic refresh)
+        self.flip_stats = self._load_flip_stats_from_file()
+        self._flip_stats_lock = threading.Lock()
+        self._flip_stats_refresh_thread: threading.Thread | None = None
+        self._next_flip_stats_refresh_ts: float = 0.0
         
         # Prometheus metrics
         self._setup_prometheus_metrics()
 
-    def _load_flip_stats(self) -> dict:
-        """Load flip probability lookup table from JSON"""
+    def _load_flip_stats_from_file(self) -> dict:
+        """Load flip probability lookup table from JSON file (initial/fallback)"""
         try:
             flip_stats_path = os.path.join(
                 os.path.dirname(os.path.dirname(__file__)),
@@ -134,7 +140,6 @@ class PolymarketPDEStrategy(Strategy):
             with open(flip_stats_path, 'r') as f:
                 data = json.load(f)
                 
-            # Convert string keys to tuple keys
             flip_stats = {}
             for key, prob in data.get('data', {}).items():
                 parts = key.split('_')
@@ -142,12 +147,97 @@ class PolymarketPDEStrategy(Strategy):
                     tau_low, tau_high, delta_low, delta_high = map(int, parts)
                     flip_stats[(tau_low, tau_high, delta_low, delta_high)] = prob
             
-            self.log.info(f"✅ Loaded {len(flip_stats)} flip probability entries")
+            self.log.info(f"✅ Loaded {len(flip_stats)} flip probability entries from file")
             return flip_stats
             
         except Exception as e:
-            self.log.error(f"❌ Failed to load flip stats: {e}")
+            self.log.error(f"❌ Failed to load flip stats from file: {e}")
             return {}
+
+    # ── Dynamic flip stats refresh ────────────────────────────────────────
+
+    def _schedule_flip_stats_refresh(self) -> None:
+        """Schedule next flip stats refresh based on config interval."""
+        interval_min = self.config.flip_stats_refresh_minutes
+        if interval_min <= 0:
+            return  # disabled
+        self._next_flip_stats_refresh_ts = self.clock.timestamp() + interval_min * 60
+        self.log.info(
+            f"📊 Next flip stats refresh in {interval_min} min "
+            f"(lookback={self.config.flip_stats_lookback})"
+        )
+
+    def _check_flip_stats_refresh(self) -> None:
+        """Check if it's time to refresh flip stats in background thread."""
+        if self.config.flip_stats_refresh_minutes <= 0:
+            return
+        if self._next_flip_stats_refresh_ts <= 0:
+            return
+        if self._flip_stats_refresh_thread is not None and self._flip_stats_refresh_thread.is_alive():
+            return  # already running
+        if self.clock.timestamp() < self._next_flip_stats_refresh_ts:
+            return
+
+        self.log.info(
+            f"🔄 Refreshing flip stats from Binance ({self.config.flip_stats_lookback})..."
+        )
+        self._flip_stats_refresh_thread = threading.Thread(
+            target=self._refresh_flip_stats_worker,
+            daemon=True,
+        )
+        self._flip_stats_refresh_thread.start()
+
+    def _refresh_flip_stats_worker(self) -> None:
+        """Background thread: fetch Binance data → compute flip probs → hot-swap."""
+        try:
+            from utils.flip_stats_engine import generate_flip_stats, flip_probs_to_lookup
+
+            flip_probs, sample_counts = generate_flip_stats(
+                lookback=self.config.flip_stats_lookback,
+                symbol="BTCUSDT",
+                interval="auto",
+                min_samples=5,
+                verbose=False,
+            )
+
+            if not flip_probs:
+                self.log.warning("⚠️  Flip stats refresh returned empty data, keeping old stats")
+                self._schedule_flip_stats_refresh()
+                return
+
+            new_lookup = flip_probs_to_lookup(flip_probs)
+
+            with self._flip_stats_lock:
+                self.flip_stats = new_lookup
+
+            self.log.info(
+                f"✅ Flip stats refreshed: {len(new_lookup)} buckets "
+                f"(lookback={self.config.flip_stats_lookback})"
+            )
+
+            # Also persist to file for next cold start
+            try:
+                from datetime import datetime, timezone
+                output = {
+                    "description": "Auto-refreshed flip probability table",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "lookback": self.config.flip_stats_lookback,
+                    "data": flip_probs,
+                    "sample_counts": sample_counts,
+                }
+                path = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    self.config.flip_stats_path
+                )
+                with open(path, 'w') as f:
+                    json.dump(output, f, indent=2)
+            except Exception:
+                pass  # File write failure is non-critical
+
+        except Exception as e:
+            self.log.warning(f"⚠️  Flip stats refresh failed: {e}")
+
+        self._schedule_flip_stats_refresh()
 
     def _setup_prometheus_metrics(self) -> None:
         """Initialize Prometheus monitoring metrics"""
@@ -307,6 +397,8 @@ class PolymarketPDEStrategy(Strategy):
         self.log.info(f"   BTC jump threshold: {self.config.btc_jump_threshold_bps} bps")
         self.log.info(f"   Jump staleness    : {self.config.jump_staleness_sec}s")
         self.log.info(f"   Max slippage      : {self.config.max_slippage_pct:.0%}")
+        self.log.info(f"   Flip stats lookback: {self.config.flip_stats_lookback}")
+        self.log.info(f"   Flip stats refresh : {self.config.flip_stats_refresh_minutes} min")
 
         # Start Prometheus HTTP server
         try:
@@ -331,6 +423,9 @@ class PolymarketPDEStrategy(Strategy):
         
         # Schedule proactive provider refresh at halfway through cached instruments
         self._schedule_next_provider_refresh()
+        
+        # Schedule dynamic flip stats refresh (background thread)
+        self._schedule_flip_stats_refresh()
 
     def on_stop(self) -> None:
         self.clock.cancel_timer("pde_market_rollover_check")
@@ -574,6 +669,9 @@ class PolymarketPDEStrategy(Strategy):
     def _on_rollover_timer(self, event) -> None:
         # ── Proactive provider refresh: keep cache fresh for long-running ──
         self._check_proactive_refresh()
+        
+        # ── Dynamic flip stats refresh ──
+        self._check_flip_stats_refresh()
 
         # ── If rollover is in progress (waiting for instruments), just retry ──
         if self._rollover_in_progress:
@@ -1007,10 +1105,11 @@ class PolymarketPDEStrategy(Strategy):
         return float(sigma)
 
     def _get_flip_prob(self, tau: float, abs_delta: float) -> float | None:
-        """Query flip probability from lookup table"""
-        for (tau_low, tau_high, delta_low, delta_high), p in self.flip_stats.items():
-            if tau_low <= tau <= tau_high and delta_low <= abs_delta <= delta_high:
-                return p
+        """Query flip probability from lookup table (thread-safe)"""
+        with self._flip_stats_lock:
+            for (tau_low, tau_high, delta_low, delta_high), p in self.flip_stats.items():
+                if tau_low <= tau <= tau_high and delta_low <= abs_delta <= delta_high:
+                    return p
         return None
 
     def _check_book_depth(self, instrument, qty: float, side: OrderSide, token_key: str) -> tuple[bool, float]:

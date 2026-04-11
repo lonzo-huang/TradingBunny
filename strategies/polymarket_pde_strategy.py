@@ -64,6 +64,9 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     
     # Debug mode
     debug_raw_data: bool = False  # Print raw market data for debugging
+    
+    # BTC price source
+    btc_price_source: str = "trade"  # "trade" = last trade price (default), "mid" = bid/ask mid price
 
 
 class PolymarketPDEStrategy(Strategy):
@@ -413,9 +416,13 @@ class PolymarketPDEStrategy(Strategy):
 
         self._subscribe_current_market()
         
-        # Subscribe to Binance BTCUSDT trade ticks for real-time BTC price
-        self.subscribe_trade_ticks(self.btc_instrument_id)
-        self.log.info(f"📈 Subscribed to Binance BTC spot: {self.btc_instrument_id}")
+        # Subscribe to Binance BTCUSDT based on config (trade=last price, mid=bid/ask mid)
+        if self.config.btc_price_source == "mid":
+            self.subscribe_quote_ticks(self.btc_instrument_id)
+            self.log.info(f"📈 Subscribed to Binance BTC (QuoteTick/mid price): {self.btc_instrument_id}")
+        else:
+            self.subscribe_trade_ticks(self.btc_instrument_id)
+            self.log.info(f"📈 Subscribed to Binance BTC (TradeTick/last price): {self.btc_instrument_id}")
 
         if self.config.auto_rollover:
             self.clock.set_timer(
@@ -444,7 +451,11 @@ class PolymarketPDEStrategy(Strategy):
             self.unsubscribe_quote_ticks(instrument_id)
             self.unsubscribe_order_book_deltas(instrument_id)
         
-        self.unsubscribe_trade_ticks(self.btc_instrument_id)
+        # Unsubscribe BTC based on config
+        if self.config.btc_price_source == "mid":
+            self.unsubscribe_quote_ticks(self.btc_instrument_id)
+        else:
+            self.unsubscribe_trade_ticks(self.btc_instrument_id)
         self.log.info("🛑 PDE Strategy stopped.")
 
     def on_reset(self) -> None:
@@ -596,15 +607,22 @@ class PolymarketPDEStrategy(Strategy):
         self._rollover_retry_count = 0
 
         self.instrument = up_matched
-        self.subscribe_quote_ticks(up_matched.id)
-        self.subscribe_order_book_deltas(up_matched.id, book_type=BookType.L2_MBP)
-        self.log.info(f"📊 Subscribed to Up: {up_matched.id}")
+        try:
+            self.subscribe_quote_ticks(up_matched.id)
+            self.subscribe_order_book_deltas(up_matched.id, book_type=BookType.L2_MBP)
+            self.log.info(f"📊 Subscribed to Up: {up_matched.id}")
+        except RuntimeError as e:
+            self.log.warning(f"⚠️ Subscribe Up delayed (WS not ready): {e}")
+            # Will auto-retry via WS reconnection
             
         if down_matched:
             self.down_instrument = down_matched
-            self.subscribe_quote_ticks(down_matched.id)
-            self.subscribe_order_book_deltas(down_matched.id, book_type=BookType.L2_MBP)
-            self.log.info(f"📊 Subscribed to Down: {down_matched.id}")
+            try:
+                self.subscribe_quote_ticks(down_matched.id)
+                self.subscribe_order_book_deltas(down_matched.id, book_type=BookType.L2_MBP)
+                self.log.info(f"📊 Subscribed to Down: {down_matched.id}")
+            except RuntimeError as e:
+                self.log.warning(f"⚠️ Subscribe Down delayed (WS not ready): {e}")
         else:
             self.log.warning(f"⚠️  No Down token found for {slug}")
 
@@ -683,12 +701,25 @@ class PolymarketPDEStrategy(Strategy):
 
         # ── Staleness watchdog: detect WS drop and force resubscribe ──
         now_ts = self.clock.timestamp()
+        # Check Polymarket tick staleness
         if (self.last_quote_tick_ts > 0
                 and (now_ts - self.last_quote_tick_ts) > 90
                 and self._resubscribe_attempts < 3):
             self._resubscribe_attempts += 1
             self.log.warning(
                 f"⚠️  No quote tick for {now_ts - self.last_quote_tick_ts:.0f}s — "
+                f"forcing resubscribe (attempt {self._resubscribe_attempts}/3)"
+            )
+            self._force_resubscribe()
+            return
+        
+        # Check BTC tick staleness (separate from Polymarket)
+        if (self.btc_last_tick_wall_ts > 0
+                and (now_ts - self.btc_last_tick_wall_ts) > 30
+                and self._resubscribe_attempts < 3):
+            self._resubscribe_attempts += 1
+            self.log.warning(
+                f"⚠️  No BTC tick for {now_ts - self.btc_last_tick_wall_ts:.0f}s — "
                 f"forcing resubscribe (attempt {self._resubscribe_attempts}/3)"
             )
             self._force_resubscribe()
@@ -715,9 +746,10 @@ class PolymarketPDEStrategy(Strategy):
         # 2. Close all open positions (realize PnL)
         self._close_all_open_positions()
             
-        # Reset round state
+        # Reset round state - calculate start_ts immediately based on current time
+        # (align to 5-minute market intervals for real-time countdown accuracy)
+        self.start_ts = self._calculate_round_start_ts()
         self.start_price = {'up': None, 'down': None}
-        self.start_ts = None
         self.positions = {
             'up': {'open': False, 'entry_price': 0.0},
             'down': {'open': False, 'entry_price': 0.0},
@@ -759,58 +791,43 @@ class PolymarketPDEStrategy(Strategy):
             self.subscribe_quote_ticks(self.down_instrument.id)
             self.subscribe_order_book_deltas(self.down_instrument.id, book_type=BookType.L2_MBP)
             self.log.info(f"🔄 Resubscribed Down: {self.down_instrument.id}")
-
-    # ── Binance BTC trade tick processing ────────────────────────────────
-
-    def on_trade_tick(self, tick: TradeTick) -> None:
-        """Process trade ticks from Binance BTCUSDT"""
-        if tick.instrument_id != self.btc_instrument_id:
-            return
         
-        self.btc_price = float(tick.price)
-        self.btc_price_gauge.set(self.btc_price)
-        self.btc_last_tick_wall_ts = self.clock.timestamp()
-        
-        # Initialize BTC anchor for jump detection — always, even before round starts
-        if self.btc_anchor_price is None:
-            self.btc_anchor_price = self.btc_price
-        
-        # Initialize BTC start price for the round
-        if self.btc_start_price is None and self.start_ts is not None:
-            self.btc_start_price = self.btc_price
-            self.log.info(f"📈 BTC start_price={self.btc_start_price:.2f}")
-        
-        # ── Jump detection ──
-        if self.btc_anchor_price is not None and self.btc_anchor_price > 0:
-            move_bps = (self.btc_price - self.btc_anchor_price) / self.btc_anchor_price * 10000
-            self.btc_momentum_gauge.set(move_bps)
-            if abs(move_bps) >= self.config.btc_jump_threshold_bps:
-                self.btc_jump_ts = self.btc_last_tick_wall_ts
-                self.btc_jump_direction = 1 if move_bps > 0 else -1
-                self.btc_anchor_price = self.btc_price  # reset anchor to new level
-        
-        # Update BTC price history for sigma estimation
-        self.btc_price_history.append(self.btc_price)
-        
-        # Update BTC delta_p metric
-        if self.btc_start_price is not None:
-            btc_delta = self.btc_price - self.btc_start_price
-            self.btc_delta_p_gauge.set(btc_delta)
-        
-        # Debug: Print BTC data
-        if self.config.debug_raw_data:
-            move_bps = (self.btc_price - self.btc_anchor_price) / self.btc_anchor_price * 10000 if self.btc_anchor_price else 0
-            delta_pct = (self.btc_price - self.btc_start_price) / self.btc_start_price * 100 if self.btc_start_price else 0
-            self.log.info(
-                f"[DEBUG] BTC | Price={self.btc_price:.2f} | "
-                f"Move={move_bps:+.1f}bps | Delta={delta_pct:+.2f}% | "
-                f"Size={float(tick.size):.2f} | Ts={tick.ts_event}"
-            )
+        # Re-subscribe Binance BTC based on config
+        if self.config.btc_price_source == "mid":
+            self.subscribe_quote_ticks(self.btc_instrument_id)
+        else:
+            self.subscribe_trade_ticks(self.btc_instrument_id)
+        self.log.info("🔄 Resubscribed Binance BTC")
 
     # ── Quote tick processing ──────────────────────────────────────────────
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
-        """Process quote ticks from Up/Down tokens"""
+        """Process quote ticks from Binance BTC (if mid price mode) and Polymarket Up/Down tokens"""
+        # Handle Binance BTC quote ticks only if using mid price mode
+        if tick.instrument_id == self.btc_instrument_id and self.config.btc_price_source == "mid":
+            bid = float(tick.bid_price)
+            ask = float(tick.ask_price)
+            if bid > 0 and ask > 0:
+                self.btc_price = (bid + ask) / 2.0
+            elif ask > 0:
+                self.btc_price = ask
+            elif bid > 0:
+                self.btc_price = bid
+            else:
+                return  # Invalid tick
+            
+            self._update_btc_metrics()
+            
+            # Debug log
+            if self.config.debug_raw_data:
+                spread_pct = ((ask - bid) / ask * 100) if ask > 0 else 0
+                self.log.info(
+                    f"[DEBUG] BTC | Mid={self.btc_price:.2f} | Bid={bid:.2f} | Ask={ask:.2f} | "
+                    f"Spread={spread_pct:.3f}% | Ts={tick.ts_event}"
+                )
+            return  # BTC tick processed, exit early
+        
+        # Handle Polymarket Up/Down quote ticks
         self.last_quote_tick_ts = self.clock.timestamp()
         self.poly_last_tick_wall_ts = self.last_quote_tick_ts
         self._resubscribe_attempts = 0  # reset on any live tick
@@ -839,17 +856,63 @@ class PolymarketPDEStrategy(Strategy):
         elif self.down_instrument and tick.instrument_id == self.down_instrument.id:
             self._process_tick(tick, is_up=False)
 
+    def _update_btc_metrics(self) -> None:
+        """Update BTC price metrics and jump detection (called from on_quote_tick or on_trade_tick)"""
+        self.btc_price_gauge.set(self.btc_price)
+        self.btc_last_tick_wall_ts = self.clock.timestamp()
+        
+        # Initialize BTC anchor and start price
+        if self.btc_anchor_price is None:
+            self.btc_anchor_price = self.btc_price
+        if self.btc_start_price is None and self.start_ts is not None:
+            self.btc_start_price = self.btc_price
+            self.log.info(f"📈 BTC start_price={self.btc_start_price:.2f}")
+        
+        # Jump detection
+        if self.btc_anchor_price is not None and self.btc_anchor_price > 0:
+            move_bps = (self.btc_price - self.btc_anchor_price) / self.btc_anchor_price * 10000
+            self.btc_momentum_gauge.set(move_bps)
+            if abs(move_bps) >= self.config.btc_jump_threshold_bps:
+                self.btc_jump_ts = self.btc_last_tick_wall_ts
+                self.btc_jump_direction = 1 if move_bps > 0 else -1
+                self.btc_anchor_price = self.btc_price
+        
+        # Update history and delta
+        self.btc_price_history.append(self.btc_price)
+        if self.btc_start_price is not None:
+            self.btc_delta_p_gauge.set(self.btc_price - self.btc_start_price)
+
+    def on_trade_tick(self, tick: TradeTick) -> None:
+        """Process trade ticks from Binance BTC (when using trade price mode)"""
+        if tick.instrument_id != self.btc_instrument_id:
+            return
+        
+        # Only process if using trade price mode (default)
+        if self.config.btc_price_source != "trade":
+            return
+        
+        self.btc_price = float(tick.price)
+        self._update_btc_metrics()
+        
+        # Debug log
+        if self.config.debug_raw_data:
+            self.log.info(
+                f"[DEBUG] BTC | Trade={self.btc_price:.2f} | Size={float(tick.size):.4f} | Ts={tick.ts_event}"
+            )
+
     def _process_tick(self, tick: QuoteTick, is_up: bool) -> None:
         """Main tick processing logic for PDE strategy"""
         
         price = float(tick.bid_price + tick.ask_price) / 2.0
         token_key = 'up' if is_up else 'down'
         
-        ts_sec = tick.ts_event // 1_000_000_000
+        # Use UTC system clock for real-time countdown (not tick timestamp which may lag)
+        utc_now = datetime.now(timezone.utc)
+        ts_sec = int(utc_now.timestamp())
         
-        # Initialize round timestamp
+        # Initialize round timestamp on first tick of new market
         if self.start_ts is None:
-            self.start_ts = ts_sec
+            self.start_ts = self._calculate_round_start_ts()
             self.A_trades = 0
             self.tail_trade_done = False
             self.price_history['up'].clear()
@@ -857,7 +920,7 @@ class PolymarketPDEStrategy(Strategy):
             self.btc_start_price = self.btc_price  # Snapshot BTC price at round start
             self.btc_anchor_price = self.btc_price  # Reset jump anchor for new round
             self.btc_price_history.clear()
-            self.log.info(f"🎬 Round started: ts={self.start_ts}, btc={self.btc_start_price}")
+            self.log.info(f"🎬 Round started: ts={self.start_ts}, btc={self.btc_start_price}, utc={utc_now}")
         
         # Initialize start_price per token
         if self.start_price[token_key] is None:
@@ -868,9 +931,10 @@ class PolymarketPDEStrategy(Strategy):
         # Update price history per token
         self.price_history[token_key].append(price)
         
-        # Calculate round state
+        # Calculate round state using interval from config
+        interval_sec = self.config.market_interval_minutes * 60
         t_elapsed = ts_sec - self.start_ts
-        remaining = 300 - t_elapsed
+        remaining = interval_sec - t_elapsed
         
         # ── Always check TP/SL on existing position for this token ──
         self._check_tp_sl(token_key, price)
@@ -1087,8 +1151,28 @@ class PolymarketPDEStrategy(Strategy):
                 self._close_token_position(token_key, "Round ended / Rollover")
                 self.tp_sl_counter.labels(token_type=token_key, trigger='expire').inc()
                 self.position_pnl_pct_gauge.labels(token_type=token_key).set(0)
+        
+        # Reset round state for new market
+        self.start_ts = None
+        self.start_price = {'up': None, 'down': None}
+        self.btc_start_price = None
+        self.btc_anchor_price = None
+        self.log.info("🔄 Round state reset after expiration")
 
     # ── Utility functions ──────────────────────────────────────────────────
+
+    def _calculate_round_start_ts(self) -> int:
+        """Calculate the expected market open timestamp aligned to configured intervals
+        
+        This ensures real-time countdown accuracy even before first tick arrives.
+        Must match _get_current_slug() logic exactly.
+        """
+        now = datetime.now(timezone.utc)
+        interval = self.config.market_interval_minutes
+        # Round down to previous interval boundary (must match slug calculation)
+        minute_bucket = (now.minute // interval) * interval
+        aligned_time = now.replace(minute=minute_bucket, second=0, microsecond=0)
+        return int(aligned_time.timestamp())
 
     def _estimate_sigma(self, token_key: str) -> float | None:
         """Estimate volatility strictly from BTC price history (no token fallback)"""

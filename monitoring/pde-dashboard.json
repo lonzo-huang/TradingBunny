@@ -77,7 +77,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 4, "w": 8, "x": 8, "y": 1 },
       "targets": [{ "expr": "pde_btc_price", "legendFormat": "BTC/USDT", "refId": "A" }],
-      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 } }
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 2 } }
     },
     {
       "id": 4,

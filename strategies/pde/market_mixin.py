@@ -97,6 +97,7 @@ class PDEMarketMixin:
                 down_matched = inst
         
         # Fallback: sort by token_id if outcome matching failed
+        # Note: On Polymarket, larger token_id = UP, smaller = DOWN
         if up_matched is None or down_matched is None:
             instruments_with_tokens = []
             for inst in matching_instruments:
@@ -106,14 +107,17 @@ class PDEMarketMixin:
                 except:
                     token_int = 0
                 instruments_with_tokens.append((token_int, inst))
-            
-            instruments_with_tokens.sort(key=lambda x: x[0])
-            
-            if up_matched is None and len(instruments_with_tokens) >= 1:
-                up_matched = instruments_with_tokens[0][1]
-            if down_matched is None and len(instruments_with_tokens) >= 2:
-                down_matched = instruments_with_tokens[1][1]
-        
+
+            instruments_with_tokens.sort(key=lambda x: x[0])  # ascending: [small, large]
+
+            # Polymarket: larger token_id = UP, smaller = DOWN
+            if up_matched is None and len(instruments_with_tokens) >= 2:
+                up_matched = instruments_with_tokens[-1][1]   # largest = UP
+            if down_matched is None and len(instruments_with_tokens) >= 1:
+                down_matched = instruments_with_tokens[0][1]  # smallest = DOWN
+
+            self.log.info(f"📊 Token mapping (fallback): UP={instruments_with_tokens[-1][0] if len(instruments_with_tokens)>=2 else 'N/A'}, DOWN={instruments_with_tokens[0][0] if instruments_with_tokens else 'N/A'}")
+
         return up_matched, down_matched
     
     def _subscribe_current_market(self) -> None:

@@ -184,18 +184,30 @@ class PolymarketPDEStrategy(
         )
         
         # Trading logic
+        pos = self.positions[token_key]
+        self.log.debug(f"[TRADE] {token_key} phase={phase} ev={ev:.4f} threshold={self.config.min_edge_threshold} delta_pct={delta_pct:.4f} pos_open={pos['open']}")
+
         if in_phase_a:
             # Phase A: momentum entry
             if ev > self.config.min_edge_threshold:
+                self.log.info(f"[TRADE] Phase A entry signal: {token_key} ev={ev:.4f} > {self.config.min_edge_threshold}")
                 self._maybe_exit_position(token_key, mid, ev, phase)
-                self._enter_position(token_key, 'buy' if delta_pct > 0 else 'sell', 
-                                     mid, self.config.per_trade_usd / mid, phase)
+                side = 'buy' if delta_pct > 0 else 'sell'
+                self.log.info(f"[TRADE] Attempting {token_key} {side} @ {mid:.4f}")
+                result = self._enter_position(token_key, side, mid, self.config.per_trade_usd / mid, phase)
+                self.log.info(f"[TRADE] Entry result: {result}")
+            else:
+                self.log.debug(f"[TRADE] Phase A: ev={ev:.4f} <= threshold={self.config.min_edge_threshold}, no entry")
         else:
             # Phase B: tail reversal
+            self.log.debug(f"[TRADE] Phase B: tail_cond={tail_cond} tail_done={self.tail_trade_done}")
             if tail_cond and not self.tail_trade_done:
-                self._enter_position(token_key, 'buy' if delta_pct < 0 else 'sell',
-                                     mid, self.config.per_trade_usd / mid, phase)
-                self.tail_trade_done = True
+                self.log.info(f"[TRADE] Phase B tail entry: {token_key}")
+                side = 'buy' if delta_pct < 0 else 'sell'
+                result = self._enter_position(token_key, side, mid, self.config.per_trade_usd / mid, phase)
+                if result:
+                    self.tail_trade_done = True
+                    self.log.info(f"[TRADE] Tail entry success")
             
             # Exit if EV turns negative
             self._maybe_exit_position(token_key, mid, ev, phase)

@@ -78,27 +78,35 @@ if bid <= 0 and ask <= 0:
 
 ## 6. 配置文件
 
-### PolymarketPDEStrategyConfig 关键参数
+### 表A：模块化 PDE 策略参数（已定义并生效）
 
-```python
-class PolymarketPDEStrategyConfig(StrategyConfig):
-    market_base_slug: str           # 市场基础标识 (如 "btc-updown-5m")
-    market_interval_minutes: int = 5  # 市场周期(分钟)
-    
-    # 风险控制
-    max_position_usd: float = 500.0   # 最大持仓金额
-    per_trade_usd: float = 100.0      # 单笔交易金额
-    min_edge_threshold: float = 0.02  # 最小边缘优势
-    max_slippage: float = 0.005       # 最大滑点
-    
-    # 阶段参数
-    phase_a_duration_sec: float = 240.0  # Phase A 持续时间
-    tail_start_threshold: float = 0.1    # 尾部交易触发阈值
-    
-    # BTC 监控
-    btc_jump_threshold_bps: float = 50.0  # BTC跳跃检测阈值(bps)
-    btc_price_source: str = "trade"         # "trade" 或 "mid"
-```
+> 默认定义在 `strategies/pde/base.py`，运行时覆盖在 `config/polymarket_pde_config.py`。
+
+| 参数 | 当前值 | 作用说明 |
+|------|--------|----------|
+| `market_base_slug` | `btc-updown-5m` | 市场基础 slug，用于拼接当前轮次市场标识。 |
+| `market_interval_minutes` | `5` | 每轮市场时长（分钟），影响剩余时间与 rollover 节奏。 |
+| `max_position_usd` | `500.0` | 总持仓美元上限，防止累计仓位过大。 |
+| `per_trade_usd` | `100.0` | 单次开仓目标名义金额，按 `qty=per_trade_usd/price` 计算数量。 |
+| `min_edge_threshold` | `0.02` | 基础边际阈值（当前主要用于调试日志参考，Phase A 入场阈值由 `ev_threshold_A` 决定）。 |
+| `max_slippage` | `0.005` | 预留滑点控制参数，用于约束执行价格偏离。 |
+| `spread_tolerance` | `0.05` | 预留点差容忍参数，用于未来点差风控。 |
+| `phase_a_duration_sec` | `240.0` | Phase A 持续秒数，超过后进入 Phase B。 |
+| `ev_threshold_A` | `0.05` | Phase A 的基础 EV 入场阈值。 |
+| `ev_entry_hysteresis` | `0.01` | EV 入场迟滞缓冲，实际触发阈值为 `ev_threshold_A + ev_entry_hysteresis`。 |
+| `ev_ema_alpha` | `0.25` | EV 的 EMA 平滑系数（越小越平滑、越慢）。 |
+| `ev_deadband` | `0.005` | EV 零附近死区，抑制小幅高频抖动。 |
+| `max_A_trades` | `6` | 每轮 Phase A 最大开仓次数限制。 |
+| `tail_start_threshold` | `0.1` | Phase B 尾部条件阈值（如波动率/尾部条件判定门槛）。 |
+| `entry_retry_cooldown_sec` | `1.0` | 开仓失败后重试冷却时间，避免每个 tick 重复尝试。 |
+| `btc_jump_threshold_bps` | `5.0` | BTC 跳变检测阈值（bps），用于速度优势判定。 |
+| `btc_price_source` | `trade` | BTC 价格来源：`trade`（成交价）或 `mid`（中间价）。 |
+| `proactive_refresh_interval_min` | `10.0` | 主动刷新 provider/instrument 的周期（分钟）。 |
+| `flip_stats_refresh_minutes` | `60` | 翻转概率统计刷新周期（分钟）。 |
+| `flip_stats_lookback` | `200` | 刷新翻转统计时的回看窗口大小。 |
+| `pnl_display_interval_sec` | `10.0` | PnL 展示/打印节奏控制（秒）。 |
+| `debug_raw_data` | `True` | 原始数据调试日志开关。 |
+| `debug_ws` | `False` | WebSocket 调试日志开关。 |
 
 ## 7. 运行策略
 

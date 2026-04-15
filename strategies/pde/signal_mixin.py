@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import json
 import os
 import threading
@@ -22,6 +23,19 @@ class PDESignalMixin:
     _flip_stats_refresh_thread: Any | None
     _next_flip_stats_refresh_ts: float
     price_history: dict
+
+    def _smooth_phase_a_ev(self, token_key: str, ev_raw: float) -> float:
+        """Smooth Phase A EV with EMA and clamp tiny noise around zero."""
+        alpha = max(0.0, min(1.0, float(getattr(self.config, 'ev_ema_alpha', 0.25))))
+        deadband = max(0.0, float(getattr(self.config, 'ev_deadband', 0.0)))
+
+        prev = self.ev_ema.get(token_key)
+        if prev is None:
+            ev_smoothed = ev_raw
+        else:
+            ev_smoothed = prev + alpha * (ev_raw - prev)
+        self.ev_ema[token_key] = ev_smoothed
+        return 0.0 if abs(ev_smoothed) < deadband else ev_smoothed
     
     def _load_flip_stats_from_file(self) -> dict:
         """Load flip probability lookup table from JSON."""
@@ -31,7 +45,14 @@ class PDESignalMixin:
             )
             with open(flip_stats_path, 'r') as f:
                 data = json.load(f)
-            self.log.info(f"📊 Loaded flip stats: {len(data.get('probs', {}))} buckets")
+
+            # Support both schemas:
+            # - legacy: {"probs": {...}}
+            # - current: {"data": {...}}
+            buckets = data.get('probs') or data.get('data') or {}
+            self.flip_probs = buckets
+
+            self.log.info(f"📊 Loaded flip stats: {len(buckets)} buckets")
             return data
         except Exception as e:
             self.log.error(f"❌ Failed to load flip stats: {e}")
@@ -96,11 +117,14 @@ class PDESignalMixin:
         # Calculate EV
         if in_phase_a:
             # Phase A: momentum following
-            ev = self._ev_phase_a(p_up, current_price)
+            ev_raw = self._ev_phase_a(p_up, current_price)
+            ev = self._smooth_phase_a_ev(token_key, ev_raw)
             return ev, p_flip, False
         else:
-            # Phase B: tail reversal
-            ev, tail_cond = self._ev_phase_b(p_up, p_flip, current_price, sigma)
+            # Phase B: trend continuation
+            ev, tail_cond = self._ev_phase_b(
+                p_up, p_flip, current_price, sigma, delta_pct, remaining_sec
+            )
             return ev, p_flip, tail_cond
     
     def _get_flip_bucket(self, delta_pct: float, sigma: float) -> str:
@@ -114,23 +138,48 @@ class PDESignalMixin:
             return "high"
     
     def _ev_phase_a(self, p_up: float, price: float) -> float:
-        """Phase A EV: simple momentum."""
-        # Assume 1.0 payoff if correct
-        return (p_up - 0.5) * 1.0  # Simplified
+        """Phase A EV for BUYing this token.
+
+        `p_up` here is already token-specific probability from `_calculate_ev`:
+        - up token   -> p_up = P(up)
+        - down token -> p_up = P(down)
+
+        Binary token expected value per share when buying is:
+            EV = P(win) - price
+        """
+        return p_up - price
     
-    def _ev_phase_b(self, p_up: float, p_flip: float, price: float, sigma: float) -> tuple[float, bool]:
-        """Phase B EV: tail reversal with flip probability."""
-        tail_threshold = self.config.tail_start_threshold
-        is_tail = sigma > tail_threshold
-        
-        if not is_tail:
+    def _ev_phase_b(
+        self,
+        p_up: float,
+        p_flip: float,
+        price: float,
+        sigma: float,
+        delta_pct: float,
+        remaining_sec: float,
+    ) -> tuple[float, bool]:
+        """Phase B EV: momentum continuation with time/volatility scaling.
+
+        Args:
+            delta_pct: Price change as decimal (e.g., 0.005 for 0.5%)
+        """
+        # Get threshold in USD and compute price offset ratio
+        threshold_usd = float(getattr(self.config, 'phase_b_momentum_threshold_usd', 30.0))
+        # Convert USD threshold to percentage based on current BTC price
+        btc_price = getattr(self, 'btc_price', 0) or getattr(self, 'btc_start_price', 0) or 85000
+        momentum_threshold_pct = threshold_usd / max(btc_price, 1) if btc_price > 0 else 0.005
+        if abs(delta_pct) < momentum_threshold_pct:
             return 0.0, False
-        
-        # Tail reversal expected value
-        ev_reversal = (p_flip - 0.5) * 1.0
-        tail_condition = p_flip > 0.6  # High confidence threshold
-        
-        return ev_reversal, tail_condition
+
+        remaining = max(0.0, float(remaining_sec))
+        vol_time_scaled = max(0.0, float(sigma)) * math.sqrt(remaining / 300.0)
+        z_score = abs(delta_pct) / max(vol_time_scaled, 1e-4)
+
+        # Smoothly map z-score to continuation probability in [0.5, 0.95].
+        p_cont = min(0.95, 0.5 + 0.45 * (1.0 - 1.0 / (1.0 + z_score)))
+        ev = p_cont - price
+        tail_condition = ev > 0.01
+        return ev, tail_condition
     
     def _update_price_history(self, token_key: str, price: float) -> None:
         """Update price history for volatility calculation."""

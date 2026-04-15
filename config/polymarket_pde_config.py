@@ -129,7 +129,7 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
         ),
 
         logging=LoggingConfig(
-            log_level=os.getenv("NAUTILUS_LOG_LEVEL", "INFO"),
+            log_level=os.getenv("NAUTILUS_LOG_LEVEL", "DEBUG"),
             log_directory="./logs",
             log_colors=True,
         ),
@@ -139,16 +139,24 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
         ),
 
         strategies=[
+            # Use new modular strategy
             ImportableStrategyConfig(
-                strategy_path="strategies.polymarket_pde_strategy:PolymarketPDEStrategy",
-                config_path="strategies.polymarket_pde_strategy:PolymarketPDEStrategyConfig",
+                strategy_path="strategies.pde.main:PolymarketPDEStrategy",
+                config_path="strategies.pde.main:PolymarketPDEStrategyConfig",
                 config={
                     "market_base_slug": "btc-updown-5m",
                     "market_interval_minutes": 5,
                     "trade_amount_usd": 100.0,
                     "auto_rollover": True,
                     "ev_threshold_A": 0.05,
+                    "ev_entry_hysteresis": 0.01,
+                    "ev_ema_alpha": 0.25,
+                    "ev_deadband": 0.005,
+                    "spread_tolerance": 0.03,
+                    "signal_eval_interval_sec": 0.5,
+                    "close_retry_interval_sec": 3.0,
                     "max_A_trades": 6,
+                    "phase_b_momentum_threshold_usd": 30.0,  # $30 USD absolute price offset (bidirectional)
                     "take_profit_pct": 0.30,
                     "stop_loss_pct": 0.20,
                     "delta_tail_min": 5.0,
@@ -159,9 +167,9 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     "max_slippage_pct": 0.10,
                     "volatility_window": 60,
                     "flip_stats_path": "config/flip_stats.json",
-                    "flip_stats_lookback": "24h",
+                    "flip_stats_lookback": 200,
                     "flip_stats_refresh_minutes": 60,
-                    "debug_raw_data": False,
+                    "debug_raw_data": True,
                     "order_id_tag": "002",
                 },
             ),

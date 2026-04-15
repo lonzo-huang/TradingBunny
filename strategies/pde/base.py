@@ -28,7 +28,18 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     
     # Phase parameters
     phase_a_duration_sec: float = 240.0
+    ev_threshold_A: float = 0.02
+    ev_entry_hysteresis: float = 0.01
+    ev_ema_alpha: float = 0.25
+    ev_deadband: float = 0.005
+    max_A_trades: int = 6
     tail_start_threshold: float = 0.1
+    phase_b_momentum_threshold_usd: float = 30.0  # $30 USD absolute price offset (bidirectional)
+    take_profit_pct: float = 0.30
+    stop_loss_pct: float = 0.20
+    entry_retry_cooldown_sec: float = 1.0
+    signal_eval_interval_sec: float = 0.5
+    close_retry_interval_sec: float = 3.0
     
     # BTC monitoring
     btc_jump_threshold_bps: float = 50.0
@@ -63,9 +74,38 @@ class PDEStrategyBase(Strategy):
         
         # Position state
         self.positions: dict[str, Any] = {
-            'up': {'open': False, 'entry_price': 0.0, 'size': 0.0, 'side': None, 'phase': None},
-            'down': {'open': False, 'entry_price': 0.0, 'size': 0.0, 'side': None, 'phase': None},
+            'up': {
+                'open': False,
+                'entry_price': 0.0,
+                'size': 0.0,
+                'side': None,
+                'phase': None,
+                'instrument_id': None,
+                'close_pending': False,
+                'close_requested_ts': 0.0,
+                'close_label': None,
+                'pending_open': False,
+                'pending_open_ts': 0.0,
+            },
+            'down': {
+                'open': False,
+                'entry_price': 0.0,
+                'size': 0.0,
+                'side': None,
+                'phase': None,
+                'instrument_id': None,
+                'close_pending': False,
+                'close_requested_ts': 0.0,
+                'close_label': None,
+                'pending_open': False,
+                'pending_open_ts': 0.0,
+            },
         }
+        self.ev_ema: dict[str, float | None] = {'up': None, 'down': None}
+        self._phase_a_signal_state: dict[str, str] = {'up': 'neutral', 'down': 'neutral'}
+        self._last_signal_eval_ts: dict[str, float] = {'up': 0.0, 'down': 0.0}
+        self._last_entry_attempt_ts: dict[str, float] = {'up': 0.0, 'down': 0.0}
+        self._last_entry_reject_reason: str = ""
         self.round_pnl: float = 0.0
         self.total_pnl: float = 0.0
         self.cumulative_fees: float = 0.0
@@ -100,10 +140,10 @@ class PDEStrategyBase(Strategy):
         self.btc_last_tick_wall_ts: float = 0.0
         self.poly_last_tick_wall_ts: float = 0.0
         self._last_ws_push_ts: float = 0.0
-        self._last_pnl_log_ts: float = 0.0
-        
-        # Rollover state
+        self._resubscribe_attempts: int = 0
         self._rollover_in_progress: bool = False
+        self._pending_rollover_slug: str | None = None
+        self._last_rollover_block_log_ts: float = 0.0
         self._rollover_retry_count: int = 0
         self._prewarm_lead_seconds: float = 10.0
         self.next_market_slug: str | None = None

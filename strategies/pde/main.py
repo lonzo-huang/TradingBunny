@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import math
 from datetime import datetime, timezone, timedelta
 
 # Add parent directory to path for imports
@@ -124,6 +125,9 @@ class PolymarketPDEStrategy(
         self.instrument = None
         self.down_instrument = None
         self.start_price = {'up': None, 'down': None}
+        self.ev_ema = {'up': None, 'down': None}
+        self._phase_a_signal_state = {'up': 'neutral', 'down': 'neutral'}
+        self._last_signal_eval_ts = {'up': 0.0, 'down': 0.0}
         self.start_ts = None
         self.current_market_slug = None
         self._rollover_in_progress = False
@@ -141,7 +145,17 @@ class PolymarketPDEStrategy(
         # Get mid price
         bid = float(tick.bid_price)
         ask = float(tick.ask_price)
+        if ask <= 0 or bid <= 0:
+            return
+        spread_pct = (ask - bid) / ask
+        if spread_pct > self.config.spread_tolerance:
+            self.log.debug(f"[TRADE] Skip {token_key}: spread too wide {spread_pct:.4f} > {self.config.spread_tolerance:.4f}")
+            return
         mid = (bid + ask) / 2.0
+
+        # Keep live position mark-to-market updates responsive on every tick
+        if self.positions[token_key].get('open'):
+            self._push_live_position_mark(token_key, mid)
         
         # Update price history
         self._update_price_history(token_key, mid)
@@ -149,8 +163,14 @@ class PolymarketPDEStrategy(
         # Calculate timing
         if self.start_ts is None:
             return
-        
-        elapsed = self.clock.timestamp() - self.start_ts
+
+        now_ts = self.clock.timestamp()
+        last_eval_ts = self._last_signal_eval_ts.get(token_key, 0.0)
+        if now_ts - last_eval_ts < self.config.signal_eval_interval_sec:
+            return
+        self._last_signal_eval_ts[token_key] = now_ts
+
+        elapsed = now_ts - self.start_ts
         remaining = self.config.market_interval_minutes * 60 - elapsed
         
         # Determine phase
@@ -171,6 +191,25 @@ class PolymarketPDEStrategy(
             token_key, mid, sigma, delta_pct, remaining, in_phase_a
         )
         
+        threshold_usd = float(getattr(self.config, 'phase_b_momentum_threshold_usd', 30.0))
+        btc_price_for_th = self.btc_price or self.btc_start_price or 85000
+        phase_b_momentum_threshold = threshold_usd / max(btc_price_for_th, 1)
+        phase_b_vol_time_scaled = max(0.0, float(sigma)) * math.sqrt(max(0.0, float(remaining)) / 300.0)
+        phase_b_z_score = abs(delta_pct) / max(phase_b_vol_time_scaled, 1e-4)
+        phase_b_p_cont = min(0.95, 0.5 + 0.45 * (1.0 - 1.0 / (1.0 + phase_b_z_score)))
+        phase_b_target = 'up' if delta_pct > 0 else 'down' if delta_pct < 0 else 'flat'
+        if abs(delta_pct) < phase_b_momentum_threshold:
+            phase_b_target = 'none'
+
+        if (not in_phase_a) and (self.config.debug_raw_data or self.config.debug_ws):
+            delta_usd = delta_pct * (self.btc_price or self.btc_start_price or 85000)
+            self.log.info(
+                f"[PHASE_B_DEBUG] token={token_key} delta_usd={delta_usd:+.1f} "
+                f"sigma={sigma:.6f} rem={remaining:.1f}s z={phase_b_z_score:.3f} "
+                f"p_cont={phase_b_p_cont:.3f} ev={ev:.4f} tail_cond={tail_cond} "
+                f"th=${threshold_usd:.0f} target={phase_b_target}"
+            )
+
         # Push to dashboard
         self._push_ev(
             token=token_key,
@@ -178,8 +217,17 @@ class PolymarketPDEStrategy(
             ev=ev,
             p_up=0.5 + delta_pct,
             sigma=sigma,
-            p_flip=p_flip,
+            p_flip=p_flip if in_phase_a else phase_b_p_cont,
+            p_cont=phase_b_p_cont,
             remaining=remaining,
+            tau=remaining,
+            z_score=phase_b_z_score if not in_phase_a else 0.0,
+            delta_pct=delta_pct,
+            delta_usd=delta_pct,
+            ev_tail=(phase_b_p_cont - mid) if not in_phase_a else 0.0,
+            target=phase_b_target,
+            momentum_threshold=threshold_usd,
+            tail_done=self.tail_trade_done,
             tail_condition=tail_cond
         )
         
@@ -187,33 +235,102 @@ class PolymarketPDEStrategy(
         pos = self.positions[token_key]
         self.log.debug(f"[TRADE] {token_key} phase={phase} ev={ev:.4f} threshold={self.config.min_edge_threshold} delta_pct={delta_pct:.4f} pos_open={pos['open']}")
 
+        # Always evaluate exits first for already-open positions, regardless of phase signal state.
+        if pos.get('open'):
+            if self._maybe_exit_position(token_key, mid, bid, ask, ev, phase):
+                return
+
+        def _has_other_open_or_pending(tk: str) -> bool:
+            for k, p in self.positions.items():
+                if k == tk:
+                    continue
+                if p.get('open') or p.get('pending_open'):
+                    return True
+            return False
+
         if in_phase_a:
             # Phase A: momentum entry
-            if ev > self.config.min_edge_threshold:
-                self.log.info(f"[TRADE] Phase A entry signal: {token_key} ev={ev:.4f} > {self.config.min_edge_threshold}")
-                self._maybe_exit_position(token_key, mid, ev, phase)
-                side = 'buy' if delta_pct > 0 else 'sell'
+            phase_a_threshold = self.config.ev_threshold_A
+            entry_threshold = phase_a_threshold + self.config.ev_entry_hysteresis
+            exit_threshold = max(0.0, phase_a_threshold - self.config.ev_entry_hysteresis)
+
+            prev_state = self._phase_a_signal_state.get(token_key, 'neutral')
+            state = prev_state
+            if prev_state == 'neutral':
+                if ev > entry_threshold:
+                    state = 'bullish'
+                elif ev < -entry_threshold:
+                    state = 'bearish'
+            elif prev_state == 'bullish':
+                if ev < exit_threshold:
+                    state = 'neutral'
+            elif prev_state == 'bearish':
+                if ev > -exit_threshold:
+                    state = 'neutral'
+            self._phase_a_signal_state[token_key] = state
+
+            if state == 'bullish' and prev_state != 'bullish':
+                if pos.get('open') or pos.get('pending_open'):
+                    return
+                if _has_other_open_or_pending(token_key):
+                    self.log.debug(f"[TRADE] Skip {token_key} Phase A entry: other token has open/pending position")
+                    return
+                if self.A_trades >= self.config.max_A_trades:
+                    return
+                side = 'buy'
+                last_ts = self._last_entry_attempt_ts.get(token_key, 0.0)
+                if now_ts - last_ts < self.config.entry_retry_cooldown_sec:
+                    return
+                self._last_entry_attempt_ts[token_key] = now_ts
+                self.log.info(
+                    f"[TRADE] Phase A BULL signal: {token_key} ev={ev:.4f} > {entry_threshold:.4f} "
+                    f"(base={phase_a_threshold:.4f})"
+                )
                 self.log.info(f"[TRADE] Attempting {token_key} {side} @ {mid:.4f}")
                 result = self._enter_position(token_key, side, mid, self.config.per_trade_usd / mid, phase)
-                self.log.info(f"[TRADE] Entry result: {result}")
+                if result:
+                    self.log.info(f"[TRADE] Entry result: {result}")
+                else:
+                    self.log.warning(
+                        f"[TRADE] Entry result: False reason={getattr(self, '_last_entry_reject_reason', 'unknown')}"
+                    )
             else:
-                self.log.debug(f"[TRADE] Phase A: ev={ev:.4f} <= threshold={self.config.min_edge_threshold}, no entry")
+                self.log.debug(
+                    f"[TRADE] Phase A: state={state} ev={ev:.4f} entry={entry_threshold:.4f} exit={exit_threshold:.4f}, no entry"
+                )
         else:
-            # Phase B: tail reversal
+            if pos['open'] and pos.get('phase') == 'A':
+                self.log.info(f"[TRADE] Phase A timeout close: {token_key} (now in Phase B)")
+                trigger = self._trigger_price_for_exit(pos, bid, ask, mid)
+                if self._close_position(token_key, trigger, f"phase_a_timeout_{token_key}"):
+                    self.log.info(f"[TRADE] Phase A position closed in Phase B: {token_key}")
+                else:
+                    self.log.warning(f"[TRADE] Phase A timeout close failed: {token_key}")
+                return
+
+            # Phase B: momentum continuation
             self.log.debug(f"[TRADE] Phase B: tail_cond={tail_cond} tail_done={self.tail_trade_done}")
             if tail_cond and not self.tail_trade_done:
-                self.log.info(f"[TRADE] Phase B tail entry: {token_key}")
-                side = 'buy' if delta_pct < 0 else 'sell'
-                result = self._enter_position(token_key, side, mid, self.config.per_trade_usd / mid, phase)
-                if result:
-                    self.tail_trade_done = True
-                    self.log.info(f"[TRADE] Tail entry success")
-            
-            # Exit if EV turns negative
-            self._maybe_exit_position(token_key, mid, ev, phase)
-        
+                trend_match = (
+                    (token_key == 'up' and delta_pct > 0) or
+                    (token_key == 'down' and delta_pct < 0)
+                )
+                if trend_match:
+                    if pos.get('open') or pos.get('pending_open'):
+                        return
+                    if _has_other_open_or_pending(token_key):
+                        self.log.debug(f"[TRADE] Skip {token_key} Phase B entry: other token has open/pending position")
+                        return
+                    self.log.info(
+                        f"[TRADE] Phase B momentum lock: {token_key} "
+                        f"| delta={delta_pct:.4f} | ev={ev:.4f}"
+                    )
+                    result = self._enter_position(token_key, 'buy', mid, self.config.per_trade_usd / mid, phase)
+                    if result:
+                        self.tail_trade_done = True
+                        self.log.info("[TRADE] Phase B momentum entry success")
+
         # Push phase state periodically (every 3 seconds)
-        now_ts = self.clock.timestamp()
         if not hasattr(self, '_last_phase_push_ts') or now_ts - self._last_phase_push_ts >= 3.0:
             self._last_phase_push_ts = now_ts
             self._push_phase_state(phase, remaining)
@@ -222,20 +339,34 @@ class PolymarketPDEStrategy(
         """Check and handle market rollover."""
         new_slug = self._get_current_slug()
         if new_slug == self.current_market_slug:
+            self._pending_rollover_slug = None
             return
-        
+
+        now_ts = self.clock.timestamp()
+        if self._pending_rollover_slug != new_slug:
+            self._pending_rollover_slug = new_slug
+            self._last_rollover_block_log_ts = 0.0
+
+        # Close positions (must succeed before state reset)
+        if not self._close_all_open_positions():
+            if now_ts - self._last_rollover_block_log_ts >= 5.0:
+                self._last_rollover_block_log_ts = now_ts
+                self.log.warning(" Rollover blocked: still have open positions, will retry close on next timer")
+            return
+
+        self._pending_rollover_slug = None
         self.rounds_counter.inc()
-        self.log.info(f"🔄 Rollover: {self.current_market_slug} -> {new_slug}")
-        
-        # Push rollover event
+        self.log.info(f" Rollover: {self.current_market_slug} -> {new_slug}")
+
+        # Push rollover event only when rollover is actually executed
         self._push_rollover(self.current_market_slug or '', new_slug)
-        
-        # Close positions
-        self._close_all_open_positions()
         
         # Reset state
         self.start_ts = self._calculate_round_start_ts()
         self.start_price = {'up': None, 'down': None}
+        self.ev_ema = {'up': None, 'down': None}
+        self._phase_a_signal_state = {'up': 'neutral', 'down': 'neutral'}
+        self._last_signal_eval_ts = {'up': 0.0, 'down': 0.0}
         self.round_pnl = 0.0
         self.A_trades = 0
         self.B_trades = 0
@@ -256,6 +387,7 @@ class PolymarketPDEStrategy(
         self._post_rollover_subscribe_pending = True
         self._post_rollover_switch_ts = self.clock.timestamp()
         self._post_rollover_retry_count = 0
+        self._last_post_rollover_retry_ts = self._post_rollover_switch_ts
         self._resubscribe_attempts = 0
     
     def _on_rollover_timer(self, event) -> None:

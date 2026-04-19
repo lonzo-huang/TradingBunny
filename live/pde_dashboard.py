@@ -240,7 +240,8 @@ def index() -> str:
         SELECT run_id, started_at_iso, ended_at_iso, mode, strategy,
                (SELECT COUNT(*) FROM orders WHERE orders.run_id = runs.run_id) as order_count,
                (SELECT COUNT(*) FROM fills WHERE fills.run_id = runs.run_id) as fill_count,
-               (SELECT COUNT(*) FROM positions WHERE positions.run_id = runs.run_id) as position_count
+               (SELECT COUNT(*) FROM positions WHERE positions.run_id = runs.run_id) as position_count,
+               (SELECT COUNT(DISTINCT status) FROM orders WHERE orders.run_id = runs.run_id AND status != 'FILLED') as pending_count
         FROM runs
         ORDER BY started_at_ns DESC
     """)
@@ -256,6 +257,7 @@ def index() -> str:
                     <th>Mode</th>
                     <th>Orders</th>
                     <th>Fills</th>
+                    <th>Unfilled</th>
                     <th>Positions</th>
                     <th>Actions</th>
                 </tr>
@@ -265,6 +267,7 @@ def index() -> str:
         status = "Finished" if run['ended_at_iso'] else "Running"
         status_badge = f'<span class="badge badge-filled">{status}</span>' if status == "Finished" else f'<span class="badge badge-submitted">{status}</span>'
         
+        unfilled = run['order_count'] - run['fill_count']
         content += f"""
                 <tr>
                     <td><code>{run['run_id'][:50]}...</code></td>
@@ -273,6 +276,7 @@ def index() -> str:
                     <td>{run['mode']}</td>
                     <td>{run['order_count']}</td>
                     <td>{run['fill_count']}</td>
+                    <td class="{'negative' if unfilled > 0 else ''}">{unfilled}</td>
                     <td>{run['position_count']}</td>
                     <td><a href="/run/{run['run_id']}">View Details →</a></td>
                 </tr>
@@ -304,6 +308,17 @@ def run_overview(run_id: str) -> str:
         GROUP BY phase
     """, (run_id,))
     
+    # Get positions by phase
+    pos_by_phase = query_db("""
+        SELECT phase,
+               COUNT(*) as pos_count,
+               SUM(CASE WHEN event_type = 'position_opened' THEN 1 ELSE 0 END) as opened,
+               SUM(CASE WHEN event_type = 'position_closed' THEN 1 ELSE 0 END) as closed
+        FROM positions 
+        WHERE run_id = ?
+        GROUP BY phase
+    """, (run_id,))
+    
     content = f"""
         <h2>Run Overview: <code>{run_id[:40]}...</code></h2>
         
@@ -324,6 +339,16 @@ def run_overview(run_id: str) -> str:
                 <div class="stat-label">Total Orders</div>
                 <div class="stat-value">{sum(o['cnt'] for o in orders) if orders else 0}</div>
             </div>
+        </div>
+        
+        <h3>Phase Statistics</h3>
+        <div class="stats-grid">
+            {''.join([
+                f"""<div class="stat-box" style="border-left-color: {'#1f6feb' if p['phase'] == 'A' else '#8957e5'}">
+                    <div class="stat-label">Phase {p['phase']} Positions</div>
+                    <div class="stat-value">{p['opened']} opened / {p['closed']} closed</div>
+                </div>""" for p in pos_by_phase
+            ])}
         </div>
         
         <h3>PnL by Phase</h3>
@@ -468,142 +493,201 @@ def run_fills(run_id: str) -> str:
 
 @app.route("/run/<run_id>/positions")
 def run_positions(run_id: str) -> str:
-    """Show positions for a run."""
-    positions = query_db("""
+    """Show positions for a run - grouped by Phase A/B."""
+    
+    # Get Phase A positions
+    positions_a = query_db("""
         SELECT * FROM positions 
-        WHERE run_id = ? 
+        WHERE run_id = ? AND phase = 'A'
         ORDER BY ts_iso DESC 
         LIMIT 100
     """, (run_id,))
     
-    content = f"""
-        <h2>Positions</h2>
+    # Get Phase B positions  
+    positions_b = query_db("""
+        SELECT * FROM positions 
+        WHERE run_id = ? AND phase = 'B'
+        ORDER BY ts_iso DESC 
+        LIMIT 100
+    """, (run_id,))
+    
+    # Get Phase statistics
+    stats = query_db("""
+        SELECT phase,
+               COUNT(DISTINCT position_id) as unique_positions,
+               SUM(CASE WHEN event_type = 'position_opened' THEN 1 ELSE 0 END) as opened,
+               SUM(CASE WHEN event_type = 'position_closed' THEN 1 ELSE 0 END) as closed,
+               SUM(CASE WHEN event_type = 'position_changed' THEN 1 ELSE 0 END) as changed,
+               SUM(realized_pnl) as total_realized,
+               AVG(avg_price) as avg_entry_price
+        FROM positions 
+        WHERE run_id = ?
+        GROUP BY phase
+    """, (run_id,))
+    
+    def render_position_table(positions, title):
+        if not positions:
+            return f"<h3>{title}</h3><p>No positions</p>"
+        
+        table = f"""
+        <h3>{title}</h3>
         <div class="card">
             <table>
                 <tr>
                     <th>Time</th>
                     <th>Event</th>
                     <th>Token</th>
-                    <th>Phase</th>
                     <th>Size</th>
                     <th>Avg Price</th>
                     <th>Realized PnL</th>
                     <th>Unrealized PnL</th>
                 </tr>
-    """
-    
-    for pos in positions:
-        realized_class = "positive" if (pos['realized_pnl'] or 0) >= 0 else "negative"
-        unrealized_class = "positive" if (pos['unrealized_pnl'] or 0) >= 0 else "negative"
-        content += f"""
+        """
+        for pos in positions:
+            realized_class = "positive" if (pos['realized_pnl'] or 0) >= 0 else "negative"
+            unrealized_class = "positive" if (pos['unrealized_pnl'] or 0) >= 0 else "negative"
+            table += f"""
                 <tr>
                     <td>{format_ts(pos['ts_iso'])}</td>
                     <td>{pos['event_type']}</td>
                     <td><span class="badge badge-{pos['token']}">{pos['token'].upper()}</span></td>
-                    <td><span class="badge badge-{pos['phase'].lower()}">Phase {pos['phase']}</span></td>
                     <td>{format_number(pos['position_size'])}</td>
                     <td>{format_number(pos['avg_price'])}</td>
                     <td class="{realized_class}">{format_number(pos['realized_pnl'])}</td>
                     <td class="{unrealized_class}">{format_number(pos['unrealized_pnl'])}</td>
                 </tr>
-        """
+            """
+        table += "</table></div>"
+        return table
     
-    content += "</table></div>"
+    # Build Phase stats summary
+    stats_html = """
+    <div class="stats-grid">
+    """
+    for s in stats:
+        phase_color = '#1f6feb' if s['phase'] == 'A' else '#8957e5'
+        pnl_class = "positive" if (s['total_realized'] or 0) >= 0 else "negative"
+        stats_html += f"""
+        <div class="stat-box" style="border-left-color: {phase_color}">
+            <div class="stat-label">Phase {s['phase']} Summary</div>
+            <div class="stat-value">
+                {s['unique_positions']} positions<br>
+                <small>{s['opened']} opened / {s['closed']} closed</small>
+            </div>
+            <div class="stat-label">Total Realized PnL</div>
+            <div class="stat-value {pnl_class}">{format_number(s['total_realized'])} USDC</div>
+        </div>
+        """
+    stats_html += "</div>"
+    
+    content = f"""
+        <h2>Positions by Phase</h2>
+        {stats_html}
+        {render_position_table(positions_a, 'Phase A Positions (Momentum Arbitrage)')}
+        {render_position_table(positions_b, 'Phase B Positions (Tail Reversal)')}
+    """
     
     return render_template_string(BASE_TEMPLATE, content=content, active_page="positions", run_id=run_id)
 
 
 @app.route("/run/<run_id>/pnl")
 def run_pnl(run_id: str) -> str:
-    """Show PnL chart for a run."""
-    pnl_data = query_db("""
-        SELECT ts_iso, phase, realized_pnl, unrealized_pnl, total_pnl
+    """Show PnL chart for a run - by Phase."""
+    # Get Phase A data
+    pnl_a = query_db("""
+        SELECT ts_iso, realized_pnl, unrealized_pnl, total_pnl
         FROM pnl 
-        WHERE run_id = ?
+        WHERE run_id = ? AND phase = 'A'
         ORDER BY ts_iso ASC
     """, (run_id,))
     
-    # Prepare data for chart
-    timestamps = []
-    realized = []
-    unrealized = []
-    total = []
+    # Get Phase B data
+    pnl_b = query_db("""
+        SELECT ts_iso, realized_pnl, unrealized_pnl, total_pnl
+        FROM pnl 
+        WHERE run_id = ? AND phase = 'B'
+        ORDER BY ts_iso ASC
+    """, (run_id,))
     
-    for row in pnl_data:
-        timestamps.append(format_ts(row['ts_iso']))
-        realized.append(row['realized_pnl'] or 0)
-        unrealized.append(row['unrealized_pnl'] or 0)
-        total.append(row['total_pnl'] or 0)
+    # Prepare Phase A data
+    ts_a = [format_ts(row['ts_iso']) for row in pnl_a]
+    realized_a = [row['realized_pnl'] or 0 for row in pnl_a]
+    unrealized_a = [row['unrealized_pnl'] or 0 for row in pnl_a]
+    total_a = [row['total_pnl'] or 0 for row in pnl_a]
     
-    chart_data = {
-        'labels': timestamps,
-        'realized': realized,
-        'unrealized': unrealized,
-        'total': total
-    }
+    # Prepare Phase B data
+    ts_b = [format_ts(row['ts_iso']) for row in pnl_b]
+    realized_b = [row['realized_pnl'] or 0 for row in pnl_b]
+    unrealized_b = [row['unrealized_pnl'] or 0 for row in pnl_b]
+    total_b = [row['total_pnl'] or 0 for row in pnl_b]
     
     content = f"""
-        <h2>PnL Over Time</h2>
+        <h2>PnL by Phase</h2>
         
         <div class="card">
-            <canvas id="pnlChart" class="chart-container"></canvas>
+            <canvas id="pnlChartPhaseA" class="chart-container"></canvas>
+        </div>
+        
+        <div class="card" style="margin-top: 20px;">
+            <canvas id="pnlChartPhaseB" class="chart-container"></canvas>
         </div>
         
         <h3>Raw Data</h3>
         <div class="card">
             <table>
                 <tr>
-                    <th>Time</th>
                     <th>Phase</th>
-                    <th>Realized</th>
-                    <th>Unrealized</th>
-                    <th>Total</th>
+                    <th>Data Points</th>
+                    <th>Total Realized</th>
+                    <th>Total Unrealized</th>
+                    <th>Final PnL</th>
                 </tr>
-    """
-    
-    for row in pnl_data[-50:]:  # Show last 50 entries
-        total_val = (row['realized_pnl'] or 0) + (row['unrealized_pnl'] or 0)
-        content += f"""
                 <tr>
-                    <td>{format_ts(row['ts_iso'])}</td>
-                    <td><span class="badge badge-{row['phase'].lower()}">Phase {row['phase']}</span></td>
-                    <td class="{'positive' if (row['realized_pnl'] or 0) >= 0 else 'negative'}">{format_number(row['realized_pnl'])}</td>
-                    <td class="{'positive' if (row['unrealized_pnl'] or 0) >= 0 else 'negative'}">{format_number(row['unrealized_pnl'])}</td>
-                    <td class="{'positive' if total_val >= 0 else 'negative'}">{format_number(total_val)}</td>
+                    <td><span class="badge badge-a">Phase A</span></td>
+                    <td>{len(pnl_a)}</td>
+                    <td class="{'positive' if sum(realized_a) >= 0 else 'negative'}">{format_number(sum(realized_a))}</td>
+                    <td class="{'positive' if sum(unrealized_a) >= 0 else 'negative'}">{format_number(sum(unrealized_a))}</td>
+                    <td class="{'positive' if (sum(realized_a) + sum(unrealized_a)) >= 0 else 'negative'}">{format_number(sum(realized_a) + sum(unrealized_a))}</td>
                 </tr>
-        """
-    
-    content += f"""
+                <tr>
+                    <td><span class="badge badge-b">Phase B</span></td>
+                    <td>{len(pnl_b)}</td>
+                    <td class="{'positive' if sum(realized_b) >= 0 else 'negative'}">{format_number(sum(realized_b))}</td>
+                    <td class="{'positive' if sum(unrealized_b) >= 0 else 'negative'}">{format_number(sum(unrealized_b))}</td>
+                    <td class="{'positive' if (sum(realized_b) + sum(unrealized_b)) >= 0 else 'negative'}">{format_number(sum(realized_b) + sum(unrealized_b))}</td>
+                </tr>
             </table>
         </div>
         
         <script>
-            const ctx = document.getElementById('pnlChart').getContext('2d');
-            new Chart(ctx, {{
+            // Phase A Chart
+            const ctxA = document.getElementById('pnlChartPhaseA').getContext('2d');
+            new Chart(ctxA, {{
                 type: 'line',
                 data: {{
-                    labels: {chart_data['labels']},
+                    labels: {ts_a},
                     datasets: [
                         {{
-                            label: 'Realized PnL',
-                            data: {chart_data['realized']},
+                            label: 'Phase A - Realized',
+                            data: {realized_a},
                             borderColor: '#3fb950',
                             backgroundColor: 'rgba(63, 185, 80, 0.1)',
-                            fill: true
+                            fill: false
                         }},
                         {{
-                            label: 'Unrealized PnL',
-                            data: {chart_data['unrealized']},
+                            label: 'Phase A - Unrealized',
+                            data: {unrealized_a},
                             borderColor: '#d29922',
                             backgroundColor: 'rgba(210, 153, 34, 0.1)',
-                            fill: true
+                            fill: false
                         }},
                         {{
-                            label: 'Total PnL',
-                            data: {chart_data['total']},
-                            borderColor: '#58a6ff',
-                            backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                            fill: true
+                            label: 'Phase A - Total',
+                            data: {total_a},
+                            borderColor: '#1f6feb',
+                            backgroundColor: 'rgba(31, 111, 235, 0.1)',
+                            fill: false,
+                            borderWidth: 2
                         }}
                     ]
                 }},
@@ -611,6 +695,68 @@ def run_pnl(run_id: str) -> str:
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {{
+                        title: {{
+                            display: true,
+                            text: 'Phase A PnL (Momentum Arbitrage)',
+                            color: '#c9d1d9'
+                        }},
+                        legend: {{
+                            labels: {{ color: '#c9d1d9' }}
+                        }}
+                    }},
+                    scales: {{
+                        x: {{
+                            ticks: {{ color: '#8b949e' }},
+                            grid: {{ color: '#30363d' }}
+                        }},
+                        y: {{
+                            ticks: {{ color: '#8b949e' }},
+                            grid: {{ color: '#30363d' }}
+                        }}
+                    }}
+                }}
+            }});
+            
+            // Phase B Chart
+            const ctxB = document.getElementById('pnlChartPhaseB').getContext('2d');
+            new Chart(ctxB, {{
+                type: 'line',
+                data: {{
+                    labels: {ts_b},
+                    datasets: [
+                        {{
+                            label: 'Phase B - Realized',
+                            data: {realized_b},
+                            borderColor: '#3fb950',
+                            backgroundColor: 'rgba(63, 185, 80, 0.1)',
+                            fill: false
+                        }},
+                        {{
+                            label: 'Phase B - Unrealized',
+                            data: {unrealized_b},
+                            borderColor: '#d29922',
+                            backgroundColor: 'rgba(210, 153, 34, 0.1)',
+                            fill: false
+                        }},
+                        {{
+                            label: 'Phase B - Total',
+                            data: {total_b},
+                            borderColor: '#8957e5',
+                            backgroundColor: 'rgba(137, 87, 229, 0.1)',
+                            fill: false,
+                            borderWidth: 2
+                        }}
+                    ]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{
+                        title: {{
+                            display: true,
+                            text: 'Phase B PnL (Tail Reversal)',
+                            color: '#c9d1d9'
+                        }},
                         legend: {{
                             labels: {{ color: '#c9d1d9' }}
                         }}

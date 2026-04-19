@@ -467,14 +467,8 @@ class PolymarketPDEStrategy(
                     f"[TRADE] Phase A: state={state} ev={ev:.4f} entry={entry_threshold:.4f} exit={exit_threshold:.4f}, no entry"
                 )
         else:
-            if pos['open'] and pos.get('phase') == 'A':
-                self.log.info(f"[TRADE] Phase A timeout close: {token_key} (now in Phase B)")
-                trigger = self._trigger_price_for_exit(pos, bid, ask, mid)
-                if self._close_position(token_key, trigger, f"phase_a_timeout_{token_key}"):
-                    self.log.info(f"[TRADE] Phase A position closed in Phase B: {token_key}")
-                else:
-                    self.log.warning(f"[TRADE] Phase A timeout close failed: {token_key}")
-                return
+            # Phase A positions are now allowed to carry into Phase B
+            # They will be force-closed before the 5-minute rollover (handled in check_rollover)
 
             # Phase B: momentum continuation based on trend_score
             self.log.debug(f"[TRADE] Phase B: trend_score={trend_score:.6f} threshold={threshold_pct:.6f} target={phase_b_target}")
@@ -509,7 +503,11 @@ class PolymarketPDEStrategy(
             )
     
     def check_rollover(self) -> None:
-        """Check and handle market rollover."""
+        """Check and handle market rollover.
+
+        Per real Polymarket rules: positions are force-closed at round end.
+        We attempt orderly close first, but proceed with rollover regardless.
+        """
         new_slug = self._get_current_slug()
         if new_slug == self.current_market_slug:
             self._pending_rollover_slug = None
@@ -520,12 +518,13 @@ class PolymarketPDEStrategy(
             self._pending_rollover_slug = new_slug
             self._last_rollover_block_log_ts = 0.0
 
-        # Close positions (must succeed before state reset)
-        if not self._close_all_open_positions():
+        # Attempt to close positions, but proceed regardless (force-close semantics)
+        close_attempted = self._close_all_open_positions()
+        if not close_attempted:
+            # Log warning but don't block rollover - real Polymarket force-closes at expiry
             if now_ts - self._last_rollover_block_log_ts >= 5.0:
                 self._last_rollover_block_log_ts = now_ts
-                self.log.warning(" Rollover blocked: still have open positions, will retry close on next timer")
-            return
+                self.log.warning("[ROLLOVER] Position close failed, proceeding with force-close semantics per Polymarket rules")
 
         self._pending_rollover_slug = None
         self.rounds_counter.inc()
@@ -572,7 +571,28 @@ class PolymarketPDEStrategy(
         # Prewarm next market 10s before boundary
         if 0 < seconds_to_roll <= self._prewarm_lead_seconds:
             self._prewarm_next_market()
-        
+
+        # Force-close Phase A positions when approaching round end (< 5 seconds remaining)
+        # Phase B positions are held until TP/SL or round end (all-or-nothing)
+        if seconds_to_roll < 5.0:
+            phase_a_positions = [
+                k for k in ('up', 'down')
+                if self.positions[k].get('open') and self.positions[k].get('phase') == 'A'
+            ]
+            if phase_a_positions:
+                self.log.info(f"[FORCE_CLOSE] Round ending in {seconds_to_roll:.1f}s, force-closing Phase A positions: {phase_a_positions}")
+                for token_key in phase_a_positions:
+                    pos = self.positions[token_key]
+                    inst = self.instrument if token_key == 'up' else self.down_instrument
+                    if inst:
+                        quote = self.cache.quote_tick(inst.id)
+                        if quote:
+                            bid = float(quote.bid_price)
+                            ask = float(quote.ask_price)
+                            mid = (bid + ask) / 2
+                            trigger = self._trigger_price_for_exit(pos, bid, ask, mid)
+                            self._close_position(token_key, trigger, f"force_close_phase_a_{token_key}")
+
         # Post-rollover subscription verification
         if self._post_rollover_subscribe_pending:
             if (self.last_quote_tick_ts >= self._post_rollover_switch_ts

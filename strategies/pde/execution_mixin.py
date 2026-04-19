@@ -31,8 +31,29 @@ class PDEExecutionMixin:
 
     def _event_to_dict(self, event: Any) -> dict:
         """Convert NautilusTrader event to serializable dict."""
+
+        def _convert_value(val: Any) -> Any:
+            """Recursively convert a single value to serializable format."""
+            if val is None:
+                return None
+            if isinstance(val, (str, int, float, bool)):
+                return val
+            if isinstance(val, (list, tuple)):
+                return [_convert_value(v) for v in val]
+            if isinstance(val, dict):
+                return {k: _convert_value(v) for k, v in val.items()}
+            # Convert NautilusTrader identifier types to string
+            if hasattr(val, 'value'):
+                return str(val.value)
+            if 'nautilus_trader.model.identifiers' in str(type(val)):
+                return str(val)
+            # Catch-all: convert to string
+            return str(val)
+
         if isinstance(event, dict):
-            return event
+            # Recursively process dict values
+            return {k: _convert_value(v) for k, v in event.items()}
+
         result = {}
         for attr in dir(event):
             if attr.startswith('_'):
@@ -41,17 +62,7 @@ class PDEExecutionMixin:
                 val = getattr(event, attr)
                 if callable(val):
                     continue
-                # Convert NautilusTrader identifier types to string
-                if hasattr(val, 'value'):
-                    result[attr] = str(val.value)
-                elif 'nautilus_trader.model.identifiers' in str(type(val)):
-                    result[attr] = str(val)
-                elif isinstance(val, (str, int, float, bool)):
-                    result[attr] = val
-                elif val is None:
-                    result[attr] = None
-                else:
-                    result[attr] = str(val)
+                result[attr] = _convert_value(val)
             except Exception:
                 pass
         return result

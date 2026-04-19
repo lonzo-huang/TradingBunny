@@ -590,10 +590,18 @@ class PDEExecutionMixin:
         self.log.info(f"[PNL] Round PnL: {self.round_pnl:.4f} | Total: {self.total_pnl:.4f}")
         return all_closed
     
-    def _enter_position(self, token_key: str, side: str, price: float, 
+    def _enter_position(self, token_key: str, side: str, price: float,
                         size: float, phase: str) -> bool:
         """Enter a new position if risk limits allow."""
         now_ts = self.clock.timestamp()
+
+        # Extra guard: prevent duplicate entries within same tick
+        last_entry = getattr(self, '_last_entry_ts', {})
+        if last_entry.get(token_key) == now_ts:
+            self.log.warning(f"[DUPLICATE] Entry for {token_key} already attempted this tick")
+            return False
+        last_entry[token_key] = now_ts
+        self._last_entry_ts = last_entry
         pos = self.positions[token_key]
 
         # Check existing position

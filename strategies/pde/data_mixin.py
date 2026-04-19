@@ -214,11 +214,20 @@ class PDEDataMixin:
     def _update_btc_metrics_and_push(self, bid: float, ask: float) -> None:
         """Update BTC metrics and push to dashboard."""
         self.btc_last_tick_wall_ts = self.clock.timestamp()
-        
+
         # Update gauges
         if hasattr(self, 'btc_price_gauge'):
             self.btc_price_gauge.set(self.btc_price)
-        
+
+        # 策略中途启动时（start_ts 已知但 btc_start_price 为 None）：用首个 BTC tick 做参考价
+        # 这使得 delta_pct 从"0"开始追踪，避免 Phase B 永远无信号
+        if self.btc_start_price is None and self.btc_price is not None:
+            self.btc_start_price = self.btc_price
+            self.log.info(
+                f"[BTC] btc_start_price 初始化（中途启动）= {self.btc_start_price:.2f}，"
+                f"delta 将从此价格起算"
+            )
+
         # Initialize anchor
         if self.btc_anchor_price is None:
             self.btc_anchor_price = self.btc_price

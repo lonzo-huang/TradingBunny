@@ -37,6 +37,7 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     max_A_trades: int = 6
     tail_start_threshold: float = 0.1
     phase_b_momentum_threshold_usd: float = 30.0  # $30 USD absolute price offset (bidirectional)
+    phase_b_max_token_price: float = 0.97        # Phase B 不入场的 token 价格上限（近解算无流动性）
     take_profit_pct: float = 0.30
     stop_loss_pct: float = 0.20
     entry_retry_cooldown_sec: float = 1.0
@@ -189,6 +190,9 @@ class PDEStrategyBase(Strategy):
         # Persistence
         self.persistence_store: Any | None = None
         self.persistence_run_id: str = ""
+
+        # Order tracking: client_order_id_str -> {'type': 'entry'|'close', 'token_key': str, 'phase': str}
+        self._order_map: dict[str, dict] = {}
     
     def _calculate_round_start_ts(self) -> float:
         """Calculate aligned round start timestamp."""

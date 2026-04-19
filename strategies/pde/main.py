@@ -188,6 +188,7 @@ class PolymarketPDEStrategy(
         self.tail_trade_done = False
         self._p_t = {'up': 0.5, 'down': 0.5}  # Reset p(t) probabilities
         self._btc_prev_price = None
+        self._order_map = {}  # 清除跨 round 孤儿订单记录
 
     def _runtime_params_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config', 'pde_runtime_overrides.json')
@@ -215,6 +216,7 @@ class PolymarketPDEStrategy(
             'ev_entry_hysteresis': float,
             'ev_deadband': float,
             'phase_b_momentum_threshold_usd': float,
+            'phase_b_max_token_price': float,
             'take_profit_pct': float,
             'stop_loss_pct': float,
             'spread_tolerance': float,
@@ -486,9 +488,21 @@ class PolymarketPDEStrategy(
                     if _has_other_open_or_pending(token_key):
                         self.log.debug(f"[TRADE] Skip {token_key} Phase B entry: other token has open/pending position")
                         return
+
+                    # ── Guard 1: token 价格过于极端（≥ max_token_price），沙盒/实盘均无对手方 ──
+                    phase_b_max_price = float(getattr(self.config, 'phase_b_max_token_price', 0.97))
+                    if mid >= phase_b_max_price:
+                        self.log.info(
+                            f"[SKIP] Phase B {token_key}: price={mid:.4f} ≥ max={phase_b_max_price:.4f}"
+                            f"（接近解算，无对手流动性，跳过）"
+                        )
+                        # 不设 tail_trade_done，等价格回落后仍可尝试
+                        return
+
                     self.log.info(
                         f"[TRADE] Phase B momentum lock: {token_key} "
                         f"| delta={delta_pct:.4f} | trend_score={trend_score:.6f}"
+                        f" | ev={ev:.4f} | price={mid:.4f}"
                     )
                     result = self._enter_position(
                         token_key, 'buy', mid, self.config.per_trade_usd / mid, phase,
@@ -550,7 +564,8 @@ class PolymarketPDEStrategy(
         self.B_trades = 0
         self.tail_trade_done = False
         self.btc_start_price = self.btc_price
-        
+        self._order_map = {}  # 清除飞行中订单记录，避免跨 round 误判
+
         for token_key in ('up', 'down'):
             self.positions[token_key] = {
                 'open': False, 'entry_price': 0.0, 'size': 0.0,

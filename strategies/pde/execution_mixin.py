@@ -219,12 +219,67 @@ class PDEExecutionMixin:
     def on_order_rejected(self, event) -> None:
         self._persist_order_event('order_rejected', event)
 
+        # 用 _order_map 定位这笔订单属于哪个 token / 哪种操作，并做相应清理
+        rejected_id = str(getattr(event, 'client_order_id', ''))
+        order_info = self._order_map.pop(rejected_id, None)
+        if not order_info:
+            return
+
+        token_key = order_info.get('token_key')
+        if not token_key or token_key not in self.positions:
+            return
+
+        pos = self.positions[token_key]
+
+        if order_info.get('type') == 'entry':
+            # 入场单被拒 → 清除乐观设置的本地持仓，回滚计数器
+            if pos.get('open') and pos.get('entry_order_id') == rejected_id:
+                phase = pos.get('phase') or order_info.get('phase', 'A')
+                self.log.warning(
+                    f"[CLEAR] 入场单被拒绝 (id={rejected_id})，清除本地 {token_key.upper()} 仓位"
+                )
+                # 回滚交易计数
+                if phase == 'A' and self.A_trades > 0:
+                    self.A_trades -= 1
+                elif phase == 'B':
+                    if self.B_trades > 0:
+                        self.B_trades -= 1
+                    # Phase B 仅尝试一次，失败后允许重试（重置标志）
+                    self.tail_trade_done = False
+                # 重置仓位
+                self._reset_local_position(token_key)
+                try:
+                    self.position_gauge.labels(token=token_key).set(0.0)
+                except Exception:
+                    pass
+                if self.live_server:
+                    self.live_server.push_position(
+                        token=token_key,
+                        phase=phase,
+                        is_open=False,
+                        unrealized_pnl=0.0,
+                        quantity=0.0,
+                    )
+
+        elif order_info.get('type') == 'close':
+            # 平仓单被拒 → 清除 close_pending，允许下一 tick 再次尝试
+            self.log.warning(
+                f"[WARN] 平仓单被拒绝 (id={rejected_id})，重置 {token_key.upper()} close_pending"
+            )
+            pos['close_pending'] = False
+            pos['close_requested_ts'] = 0.0
+
     def on_order_canceled(self, event) -> None:
         self._persist_order_event('order_canceled', event)
+        canceled_id = str(getattr(event, 'client_order_id', ''))
+        self._order_map.pop(canceled_id, None)
 
     def on_order_filled(self, event) -> None:
         self._persist_order_event('order_filled', event)
         self._persist_fill_event(event)
+        # 成交后从跟踪 map 移除，避免内存持续增长
+        filled_id = str(getattr(event, 'client_order_id', ''))
+        self._order_map.pop(filled_id, None)
 
     def on_account_state(self, event) -> None:
         store = getattr(self, 'persistence_store', None)
@@ -465,14 +520,15 @@ class PDEExecutionMixin:
         self.log.info(f"[OK] Close confirmed {token_key.upper()} realized_pnl={realized:.4f}")
     
     def _place_order(self, instrument: Any, side: OrderSide,
-                     price: float, size: float, label: str = "") -> bool:
+                     price: float, size: float, label: str = "") -> tuple[bool, str]:
         """Place a market order via Strategy order_factory.
 
-        Returns True on successful submit, False otherwise.
+        Returns (success, client_order_id_str).
+        client_order_id_str is empty string on failure.
         """
         if instrument is None:
             self._last_entry_reject_reason = "instrument_none"
-            return False
+            return False, ""
 
         try:
             qty = instrument.make_qty(Decimal(str(size)))
@@ -483,13 +539,14 @@ class PDEExecutionMixin:
                 tags=[f"PDE_{label}"],
             )
             self.submit_order(order)
+            order_id = str(getattr(order, 'client_order_id', ''))
             # Debug persistence
             store = getattr(self, 'persistence_store', None)
             run_id = getattr(self, 'persistence_run_id', '')
             if not store or not run_id:
                 self.log.warning(f"[PERSIST-DEBUG] Cannot persist order: store={store}, run_id={run_id}")
             self._persist_order_event('order_submitted', {
-                'client_order_id': getattr(order, 'client_order_id', ''),
+                'client_order_id': order_id,
                 'venue_order_id': getattr(order, 'venue_order_id', ''),
                 'instrument_id': str(instrument.id),
                 'order_side': side.name,
@@ -500,11 +557,11 @@ class PDEExecutionMixin:
                 'ts_event': int(self.clock.timestamp() * 1_000_000_000),
             })
             self.log.info(f"[ORDER] {side.name} {instrument.id} qty={size:.6f} ref_px={price:.4f} (label={label})")
-            return True
+            return True, order_id
         except Exception as e:
             self._last_entry_reject_reason = f"submit_error:{e}"
             self.log.error(f"[ERROR] Order submit failed ({label}): {e}")
-            return False
+            return False, ""
     
     def _close_position(self, token_key: str, current_price: float, label: str) -> bool:
         """Request close for one token position and mark it as pending.
@@ -526,9 +583,14 @@ class PDEExecutionMixin:
             return False
 
         side = OrderSide.SELL if pos['side'] == 'buy' else OrderSide.BUY
-        if not self._place_order(inst, side, current_price, pos['size'], label):
+        ok, order_id = self._place_order(inst, side, current_price, pos['size'], label)
+        if not ok:
             self.log.warning(f"[FAIL] Close failed for {token_key} label={label}")
             return False
+
+        # Track close order so on_order_rejected can clear close_pending correctly
+        if order_id:
+            self._order_map[order_id] = {'type': 'close', 'token_key': token_key}
 
         pos['close_pending'] = True
         pos['close_requested_ts'] = now_ts
@@ -645,11 +707,16 @@ class PDEExecutionMixin:
             return False
         
         order_side = OrderSide.BUY if side == 'buy' else OrderSide.SELL
-        if not self._place_order(inst, order_side, price, size, f"enter_{token_key}_{phase}"):
+        ok, order_id = self._place_order(inst, order_side, price, size, f"enter_{token_key}_{phase}")
+        if not ok:
             if not self._last_entry_reject_reason:
                 self._last_entry_reject_reason = "place_order_failed"
             return False
-        
+
+        # Track entry order so on_order_rejected can clean up local state
+        if order_id:
+            self._order_map[order_id] = {'type': 'entry', 'token_key': token_key, 'phase': phase}
+
         # Update position state - treat as immediately open for Sandbox
         self.positions[token_key].update({
             'open': True,
@@ -663,6 +730,7 @@ class PDEExecutionMixin:
             'close_label': None,
             'pending_open': False,
             'pending_open_ts': now_ts,
+            'entry_order_id': order_id,
         })
         
         # Persist entry request with full decision context (not a duplicate of on_position_opened)

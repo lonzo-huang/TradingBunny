@@ -515,7 +515,7 @@ def run_positions(run_id: str) -> str:
     # Get Phase statistics
     stats = query_db("""
         SELECT phase,
-               COUNT(DISTINCT position_id) as unique_positions,
+               COUNT(*) as total_events,
                SUM(CASE WHEN event_type = 'position_opened' THEN 1 ELSE 0 END) as opened,
                SUM(CASE WHEN event_type = 'position_closed' THEN 1 ELSE 0 END) as closed,
                SUM(CASE WHEN event_type = 'position_changed' THEN 1 ELSE 0 END) as changed,
@@ -572,8 +572,8 @@ def run_positions(run_id: str) -> str:
         <div class="stat-box" style="border-left-color: {phase_color}">
             <div class="stat-label">Phase {s['phase']} Summary</div>
             <div class="stat-value">
-                {s['unique_positions']} positions<br>
-                <small>{s['opened']} opened / {s['closed']} closed</small>
+                {s['total_events']} events<br>
+                <small>{s['opened']} opened / {s['closed']} closed / {s['changed']} changed</small>
             </div>
             <div class="stat-label">Total Realized PnL</div>
             <div class="stat-value {pnl_class}">{format_number(s['total_realized'])} USDC</div>
@@ -784,33 +784,28 @@ def run_pnl(run_id: str) -> str:
 def run_trades(run_id: str) -> str:
     """Show detailed trade analysis with entry/exit conditions."""
     
-    # Get completed trades (opened and closed positions)
+    # Get position_closed events (completed trades)
     trades = query_db("""
         SELECT 
-            p_open.position_id,
-            p_open.ts_iso as entry_time,
-            p_open.token as entry_token,
-            p_open.phase,
-            p_open.position_size as entry_size,
-            p_open.avg_price as entry_price,
-            p_open.event_type as entry_event,
-            p_open.payload_json as entry_payload,
             p_close.ts_iso as exit_time,
+            p_close.token,
+            p_close.phase,
             p_close.avg_price as exit_price,
             p_close.realized_pnl,
             p_close.event_type as exit_event,
             p_close.payload_json as exit_payload,
-            o_enter.ts_iso as order_time,
-            o_enter.label as order_label,
-            o_enter.payload_json as order_payload
-        FROM positions p_open
-        LEFT JOIN positions p_close ON p_open.position_id = p_close.position_id 
-            AND p_close.event_type = 'position_closed'
-        LEFT JOIN orders o_enter ON o_enter.run_id = p_open.run_id 
-            AND o_enter.event_type = 'order_submitted'
-            AND o_enter.ts_iso BETWEEN p_open.ts_iso AND datetime(p_open.ts_iso, '+1 minute')
-        WHERE p_open.run_id = ? AND p_open.event_type = 'position_opened'
-        ORDER BY p_open.ts_iso DESC
+            p_open.ts_iso as entry_time,
+            p_open.avg_price as entry_price,
+            p_open.position_size as entry_size,
+            p_open.payload_json as entry_payload
+        FROM positions p_close
+        LEFT JOIN positions p_open ON p_open.run_id = p_close.run_id 
+            AND p_open.token = p_close.token
+            AND p_open.phase = p_close.phase
+            AND p_open.event_type = 'position_opened'
+            AND p_open.ts_iso < p_close.ts_iso
+        WHERE p_close.run_id = ? AND p_close.event_type = 'position_closed'
+        ORDER BY p_close.ts_iso DESC
         LIMIT 50
     """, (run_id,))
     
@@ -826,11 +821,9 @@ def run_trades(run_id: str) -> str:
         try:
             import json
             data = json.loads(payload_json)
-            # Try to find EV in various places
             ev = data.get('ev') or data.get('ev_raw') or data.get('ev_smoothed')
             if ev is not None:
                 return f"{ev:.4f}"
-            # Look in nested options
             options = data.get('options', {})
             ev = options.get('ev') or options.get('p_t') or options.get('p_flip')
             if ev is not None:
@@ -838,30 +831,6 @@ def run_trades(run_id: str) -> str:
             return "N/A"
         except:
             return "N/A"
-    
-    def extract_conditions(payload_json, phase):
-        """Extract entry/exit conditions from payload."""
-        if not payload_json:
-            return {}
-        try:
-            import json
-            data = json.loads(payload_json)
-            conditions = {}
-            
-            if phase == 'A':
-                conditions['p_t'] = data.get('p_t', 'N/A')
-                conditions['q_t'] = data.get('q_t', 'N/A')
-                conditions['delta_btc'] = data.get('delta_btc_pct', 'N/A')
-                conditions['sigma'] = data.get('sigma', 'N/A')
-            else:
-                conditions['trend_score'] = data.get('trend_score', 'N/A')
-                conditions['delta_p_pct'] = data.get('delta_p_pct', 'N/A')
-                conditions['time_weight'] = data.get('time_weight', 'N/A')
-                conditions['tail_cond'] = data.get('tail_cond', 'N/A')
-            
-            return conditions
-        except:
-            return {}
     
     content = f"""
         <h2>Trade Analysis</h2>
@@ -924,16 +893,16 @@ def run_trades(run_id: str) -> str:
                         <h5 style="margin: 5px 0; color: #3fb950;">[ENTRY]</h5>
                         <table style="width: 100%;">
                             <tr><td style="color: #8b949e;">Time:</td><td>{format_ts(t['entry_time'])}</td></tr>
-                            <tr><td style="color: #8b949e;">Token:</td><td><span class="badge badge-{t['entry_token']}">{t['entry_token'].upper()}</span></td></tr>
-                            <tr><td style="color: #8b949e;">Price:</td><td>{format_number(t['entry_price'], 4)} USDC</td></tr>
-                            <tr><td style="color: #8b949e;">Size:</td><td>{format_number(t['entry_size'], 2)} shares</td></tr>
-                            <tr><td style="color: #8b949e;">EV:</td><td>{extract_ev_from_payload(t['order_payload'])}</td></tr>
+                            <tr><td style="color: #8b949e;">Token:</td><td><span class="badge badge-{t['token']}">{t['token'].upper()}</span></td></tr>
+                            <tr><td style="color: #8b949e;">Price:</td><td>{format_number(t['entry_price'], 4) if t['entry_price'] else 'N/A'} USDC</td></tr>
+                            <tr><td style="color: #8b949e;">Size:</td><td>{format_number(t['entry_size'], 2) if t['entry_size'] else 'N/A'} shares</td></tr>
+                            <tr><td style="color: #8b949e;">EV:</td><td>{extract_ev_from_payload(t['entry_payload'])}</td></tr>
                         </table>
                     </td>
                     <td style="width: 50%; vertical-align: top; padding-left: 10px; border-left: 1px solid #30363d;">
                         <h5 style="margin: 5px 0; color: #f85149;">[EXIT]</h5>
                         <table style="width: 100%;">
-                            <tr><td style="color: #8b949e;">Time:</td><td>{format_ts(t['exit_time']) if t['exit_time'] else 'Open'}</td></tr>
+                            <tr><td style="color: #8b949e;">Time:</td><td>{format_ts(t['exit_time'])}</td></tr>
                             <tr><td style="color: #8b949e;">Price:</td><td>{format_number(t['exit_price'], 4) if t['exit_price'] else 'N/A'} USDC</td></tr>
                             <tr><td style="color: #8b949e;">Reason:</td><td>{t['exit_event'] or 'N/A'}</td></tr>
                             <tr><td style="color: #8b949e;">Duration:</td><td>{duration}</td></tr>
@@ -944,8 +913,7 @@ def run_trades(run_id: str) -> str:
             </table>
             
             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #30363d; font-size: 11px; color: #8b949e;">
-                <strong>Position ID:</strong> {t['position_id'][:50]}... | 
-                <strong>Order Label:</strong> {t['order_label'] or 'N/A'}
+                <strong>Exit Reason:</strong> {t['exit_event'] or 'N/A'}
             </div>
         </div>
         """

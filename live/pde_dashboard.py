@@ -439,54 +439,184 @@ def run_orders(run_id: str) -> str:
 
 @app.route("/run/<run_id>/fills")
 def run_fills(run_id: str) -> str:
-    """Show fills for a run."""
+    """Show fills with detailed trade analysis."""
+    
+    # Get fills with order details
     fills = query_db("""
-        SELECT fills.*, orders.side as order_side
-        FROM fills 
-        LEFT JOIN orders ON fills.client_order_id = orders.client_order_id AND fills.run_id = orders.run_id
-        WHERE fills.run_id = ? 
-        ORDER BY fills.ts_iso DESC 
-        LIMIT 100
+        SELECT 
+            f.ts_iso as fill_time,
+            f.token,
+            f.side,
+            f.quantity,
+            f.price as fill_price,
+            f.fee,
+            f.trade_id,
+            f.payload_json as fill_payload,
+            o.ts_iso as order_time,
+            o.side as order_side,
+            o.label as order_label,
+            o.payload_json as order_payload
+        FROM fills f
+        LEFT JOIN orders o ON o.run_id = f.run_id 
+            AND o.client_order_id = f.client_order_id
+        WHERE f.run_id = ?
+        ORDER BY f.ts_iso DESC
+        LIMIT 200
     """, (run_id,))
     
+    def extract_ev(payload_json):
+        if not payload_json:
+            return None
+        try:
+            data = json.loads(payload_json)
+            for key in ['ev', 'ev_raw', 'ev_smoothed', 'p_t', 'p_flip']:
+                if key in data and data[key] is not None:
+                    return float(data[key])
+            opts = data.get('options', {})
+            for key in ['ev', 'p_t', 'p_flip']:
+                if key in opts and opts[key] is not None:
+                    return float(opts[key])
+            return None
+        except:
+            return None
+    
+    def extract_conditions(payload_json):
+        if not payload_json:
+            return {}
+        try:
+            data = json.loads(payload_json)
+            conds = {}
+            for key in ['p_t', 'q_t', 'delta_btc_pct', 'sigma', 'trend_score', 'delta_p_pct', 'time_weight']:
+                if key in data and data[key] is not None:
+                    conds[key] = data[key]
+            return conds
+        except:
+            return {}
+    
+    # Group by trade (5 min window)
+    groups = []
+    current = []
+    last_time = None
+    
+    for f in fills:
+        fill_time = f['fill_time']
+        if last_time and fill_time:
+            try:
+                from datetime import datetime
+                t1 = datetime.fromisoformat(last_time.replace('Z', '+00:00'))
+                t2 = datetime.fromisoformat(fill_time.replace('Z', '+00:00'))
+                if abs((t2 - t1).total_seconds()) > 300:
+                    if current:
+                        groups.append(current)
+                    current = [f]
+                else:
+                    current.append(f)
+            except:
+                current.append(f)
+        else:
+            current.append(f)
+        last_time = fill_time
+    
+    if current:
+        groups.append(current)
+    
     content = f"""
-        <h2>Fills</h2>
-        <div class="card">
-            <table>
-                <tr>
-                    <th>Time</th>
-                    <th>Side</th>
-                    <th>Quantity</th>
-                    <th>Price</th>
-                    <th>Fee</th>
-                    <th>Notional</th>
-                    <th>Trade ID</th>
-                </tr>
+        <h2>Fill Analysis</h2>
+        <p style="color: #8b949e; font-size: 12px;">{len(fills)} fills in {len(groups)} trade groups (5min window)</p>
+        
+        <div class="stats-grid">
+            <div class="stat-box"><div class="stat-label">Total Fills</div><div class="stat-value">{len(fills)}</div></div>
+            <div class="stat-box"><div class="stat-label">Trade Groups</div><div class="stat-value">{len(groups)}</div></div>
+        </div>
     """
     
-    total_notional = 0
-    for fill in fills:
-        notional = (fill['quantity'] or 0) * (fill['price'] or 0)
-        total_notional += notional
-        side = fill['order_side'] or 'BUY'
+    for i, group in enumerate(groups):
+        first = group[0]
+        total_qty = sum(f['quantity'] or 0 for f in group)
+        avg_price = sum((f['quantity'] or 0) * (f['fill_price'] or 0) for f in group) / total_qty if total_qty > 0 else 0
+        total_fee = sum(f['fee'] or 0 for f in group)
+        
+        ev = extract_ev(first['order_payload'])
+        conds = extract_conditions(first['order_payload'])
+        
+        phase = 'A' if first['order_label'] and 'A' in first['order_label'] else 'B'
+        
+        cond_html = ""
+        if conds:
+            cond_html = "<div style='margin-top: 8px; font-size: 11px;'><strong style='color: #8b949e;'>Entry Conditions:</strong><br>"
+            for k, v in conds.items():
+                cond_html += f"<span style='color: #c9d1d9;'>&nbsp;&nbsp;{k}: {v}</span><br>"
+            cond_html += "</div>"
+        
         content += f"""
-                <tr>
-                    <td>{format_ts(fill['ts_iso'])}</td>
-                    <td><span class="badge badge-{side.lower()}">{side}</span></td>
-                    <td>{format_number(fill['quantity'])}</td>
-                    <td>{format_number(fill['price'])}</td>
-                    <td>{format_number(fill['fee'])}</td>
-                    <td>{format_number(notional)}</td>
-                    <td><code>{fill['trade_id'][:20] if fill['trade_id'] else '-'}</code></td>
-                </tr>
+        <div class="card" style="margin-bottom: 15px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;" 
+                 onclick="toggle('fg{i}')">
+                <h4 style="margin: 0;">
+                    Trade #{i+1} 
+                    <span class="badge badge-{first['token']}">{first['token'].upper()}</span>
+                    <span class="badge badge-{phase.lower()}">Phase {phase}</span>
+                </h4>
+                <span style="font-size: 12px; color: #8b949e;">{len(group)} fills [点击展开]</span>
+            </div>
+            
+            <div style="margin-top: 10px; padding: 10px; background: #161b22; border-radius: 6px;">
+                <table style="width: 100%; font-size: 12px;">
+                    <tr>
+                        <td style="color: #8b949e; width: 80px;">Order:</td>
+                        <td>{format_ts(first['order_time'])}</td>
+                        <td style="color: #8b949e; width: 80px;">Side:</td>
+                        <td>{first['side']}</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #8b949e;">Total Qty:</td>
+                        <td>{format_number(total_qty, 4)}</td>
+                        <td style="color: #8b949e;">Avg Price:</td>
+                        <td>{format_number(avg_price, 4)} USDC</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #8b949e;">Total Fee:</td>
+                        <td>{format_number(total_fee, 4)} USDC</td>
+                        <td style="color: #8b949e;">EV:</td>
+                        <td>{f"{ev:.4f}" if ev else "N/A"}</td>
+                    </tr>
+                </table>
+                {cond_html}
+            </div>
+            
+            <div id="fg{i}" style="display: none; margin-top: 10px;">
+                <h5 style="margin: 10px 0; color: #58a6ff; font-size: 12px;">Individual Fills:</h5>
+                <table style="width: 100%; font-size: 11px;">
+                    <tr style="background: #21262d;">
+                        <th>Time</th><th>Qty</th><th>Price</th><th>Fee</th><th>Notional</th>
+                    </tr>
         """
-    
-    content += f"""
-            </table>
-            <div style="margin-top: 20px; text-align: right;">
-                <strong>Total Notional: {format_number(total_notional)} USDC</strong>
+        
+        for f in group:
+            notional = (f['quantity'] or 0) * (f['fill_price'] or 0)
+            content += f"""
+                    <tr>
+                        <td>{format_ts(f['fill_time'])}</td>
+                        <td>{format_number(f['quantity'], 4)}</td>
+                        <td>{format_number(f['fill_price'], 4)}</td>
+                        <td>{format_number(f['fee'], 4)}</td>
+                        <td>{format_number(notional, 2)}</td>
+                    </tr>
+            """
+        
+        content += """
+                </table>
             </div>
         </div>
+        """
+    
+    content += """
+        <script>
+            function toggle(id) {
+                const el = document.getElementById(id);
+                el.style.display = el.style.display === 'none' ? 'block' : 'none';
+            }
+        </script>
     """
     
     return render_template_string(BASE_TEMPLATE, content=content, active_page="fills", run_id=run_id)

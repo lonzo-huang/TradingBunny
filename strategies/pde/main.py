@@ -309,7 +309,7 @@ class PolymarketPDEStrategy(
         
         # Calculate EV
         ev, p_flip, tail_cond = self._calculate_ev(
-            token_key, mid, sigma, delta_pct, remaining, in_phase_a, delta_btc_pct
+            token_key, mid, sigma, delta_pct, remaining, in_phase_a, delta_btc_pct, elapsed
         )
         
         # Phase B: Trend-Reinforcement with time-weighted score
@@ -336,8 +336,10 @@ class PolymarketPDEStrategy(
         
         # Threshold check
         threshold_usd = float(getattr(self.config, 'phase_b_momentum_threshold_usd', 30.0))
-        btc_price_for_th = self.btc_price or self.btc_start_price or 85000
-        threshold_pct = threshold_usd / max(btc_price_for_th, 1)
+        btc_price_for_th = self.btc_price or self.btc_start_price
+        if btc_price_for_th is None or btc_price_for_th <= 0:
+            btc_price_for_th = 85000.0  # Reasonable default BTC price
+        threshold_pct = threshold_usd / btc_price_for_th
         
         phase_b_target = 'up' if delta_p > 0 else 'down' if delta_p < 0 else 'flat'
         if trend_score < threshold_pct:

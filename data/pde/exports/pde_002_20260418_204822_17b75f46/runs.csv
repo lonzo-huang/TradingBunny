@@ -1,0 +1,2 @@
+run_id,mode,strategy,started_at_ns,started_at_iso,ended_at_ns,ended_at_iso,metadata_json,summary_json
+pde_002_20260418_204822_17b75f46,live_node,PolymarketPDEStrategy,1776545302772521984,2026-04-18T20:48:22.772522+00:00,,,"{""market_base_slug"": ""btc-updown-5m"", ""interval_minutes"": 5, ""phase_a_duration_sec"": 240.0, ""threshold_phase_b_usd"": 30.0}",

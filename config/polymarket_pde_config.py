@@ -147,7 +147,7 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     # ===== 市场配置 =====
                     "market_base_slug": "btc-updown-5m",    # 市场基础标识，用于匹配Polymarket事件
                     "market_interval_minutes": 5,           # 每个交易区间的时长（分钟），如5分钟
-                    "trade_amount_usd": 100.0,              # 单笔交易金额（USD），每次开仓的仓位大小
+                    "per_trade_usd": 100.0,                 # 单笔交易金额（USD），每次开仓的仓位大小
                     "auto_rollover": True,                  # 是否自动切换到下一个区间，True=自动 rollover
 
                     # ===== Phase A EV套利参数 =====

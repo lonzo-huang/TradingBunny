@@ -1,0 +1,212 @@
+{
+  "uid": "pde-live",
+  "title": "PDE Strategy — Live (Sub-Second)",
+  "tags": ["polymarket", "pde", "live"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": { "from": "now-5m", "to": "now" },
+  "liveNow": true,
+  "panels": [
+
+    { "id": 100, "type": "row", "title": "⚡ Real-Time Prices", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false },
+
+    {
+      "id": 1, "title": "BTC Price", "type": "timeseries",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/btc" }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "move_bps" }, "properties": [{ "id": "custom.hideFrom", "value": { "tooltip": true, "viz": true, "legend": true } }] },
+          { "matcher": { "id": "byName", "options": "delta_usd" }, "properties": [{ "id": "custom.hideFrom", "value": { "tooltip": true, "viz": true, "legend": true } }] }
+        ]
+      }
+    },
+
+    {
+      "id": 2, "title": "Polymarket Prices", "type": "timeseries",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/poly" }],
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 5 }, "unit": "percent" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ask" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "mid" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "spread_pct" }, "properties": [{ "id": "custom.hideFrom", "value": { "tooltip": true, "viz": true, "legend": true } }] }
+        ]
+      }
+    },
+
+    {
+      "id": 3, "title": "Latency Gap", "type": "gauge",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/latency" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 20 },
+            { "color": "green", "value": 80 }
+          ]},
+          "min": 0, "max": 500
+        }
+      }
+    },
+
+    {
+      "id": 4, "title": "Latency History", "type": "timeseries",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/latency" }],
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "red", "value": null }, { "color": "yellow", "value": 20 }, { "color": "green", "value": 80 }
+      ]}}}
+    },
+
+    { "id": 200, "type": "row", "title": "🧠 Strategy State", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "collapsed": false },
+
+    {
+      "id": 5, "title": "Current Phase", "type": "stat",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 10 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/phase" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "A": { "text": "PHASE A", "color": "green" }, "B": { "text": "PHASE B", "color": "blue" }, "IDLE": { "text": "IDLE", "color": "gray" } }
+          }]
+        }
+      }
+    },
+
+    {
+      "id": 6, "title": "Remaining Time", "type": "gauge",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 10 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/phase" }],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "max": 300, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "red", "value": null }, { "color": "yellow", "value": 30 }, { "color": "green", "value": 120 }
+      ]}}}
+    },
+
+    {
+      "id": 7, "title": "Phase A Trades", "type": "stat",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 2, "x": 8, "y": 10 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/phase" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } } }
+    },
+
+    {
+      "id": 8, "title": "Phase B Trades", "type": "stat",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 2, "x": 10, "y": 10 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/phase" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } } }
+    },
+
+    {
+      "id": 9, "title": "EV + Phase Params", "type": "timeseries",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/ev" }],
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 5 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "ev" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "z_score" }, "properties": [{ "id": "custom.axisPlacement", "value": "right" }] }
+        ]
+      }
+    },
+
+    { "id": 300, "type": "row", "title": "💰 Positions & PnL", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }, "collapsed": false },
+
+    {
+      "id": 10, "title": "Position State", "type": "table",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 19 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/position" }],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "unrealized_pnl" }, "properties": [{ "id": "thresholds", "value": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null }, { "color": "green", "value": 0 }
+          ]}}] }
+        ]
+      },
+      "options": { "showHeader": true }
+    },
+
+    {
+      "id": 11, "title": "PnL Summary", "type": "timeseries",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 19 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/pnl" }],
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 10 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "round_pnl" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "cumulative_a" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+        ]
+      }
+    },
+
+    { "id": 400, "type": "row", "title": "🛡️ Safety & Anomalies", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }, "collapsed": false },
+
+    {
+      "id": 12, "title": "Safety Checks", "type": "stat",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 26 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/safety" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{ "type": "value", "options": { "0": { "text": "✗", "color": "red" }, "1": { "text": "✓", "color": "green" } } }]
+        }
+      }
+    },
+
+    {
+      "id": 13, "title": "Jump Detection", "type": "timeseries",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 26 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/jump" }],
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 20 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "move_bps" }, "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }] }
+        ]
+      }
+    },
+
+    {
+      "id": 14, "title": "Anomaly Detection", "type": "stat",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 26 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/anomaly" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{ "type": "value", "options": { "btc_stale": { "text": "BTC STALE", "color": "red" }, "poly_stale": { "text": "POLY STALE", "color": "red" } } }]
+        }
+      }
+    },
+
+    {
+      "id": 15, "title": "Order Book Depth", "type": "table",
+      "datasource": { "type": "grafana", "uid": "grafana" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 30 },
+      "targets": [{ "refId": "A", "channel": "stream/pde/depth" }],
+      "options": { "showHeader": true }
+    }
+
+  ]
+}

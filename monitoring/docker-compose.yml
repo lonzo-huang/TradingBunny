@@ -23,15 +23,22 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=520Wn1314
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=1s
+      - GF_LIVE_ENABLED=true
+      - GF_LIVE_ALLOWED_CHANNEL_PREFIXES=stream/pde
+      - GF_LIVE_ALLOWED_ORIGINS=*
+      - GF_LIVE_MAX_CONNECTIONS=100
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes:
       - grafana-storage:/var/lib/grafana
       - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana-dashboard.json:/var/lib/grafana/dashboards/polymarket.json:ro
       - ./pde-dashboard.json:/var/lib/grafana/dashboards/pde.json:ro
+      - ./pde-live-dashboard.json:/var/lib/grafana/dashboards/pde-live.json:ro
     networks:
       - monitoring
     depends_on:

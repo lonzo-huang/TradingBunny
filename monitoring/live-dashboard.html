@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDE Strategy — 实时监控台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--card-min-height:120px;--base-font-size:12px;--grid-cols:4;--grid-min-width:260px}
+body{background:#0b0c10;color:#c5c8d4;font-family:'JetBrains Mono','Fira Code','Consolas',monospace;font-size:var(--base-font-size)}
+body[data-panel-size='sm']{--card-min-height:100px;--base-font-size:11px}
+body[data-panel-size='md']{--card-min-height:120px;--base-font-size:12px}
+body[data-panel-size='lg']{--card-min-height:160px;--base-font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(var(--grid-cols),minmax(var(--grid-min-width),1fr));gap:8px;padding:8px;grid-auto-rows:minmax(var(--card-min-height),auto)}
+.card{background:#161822;border:1px solid #2a2d3a;border-radius:6px;padding:8px;min-height:var(--card-min-height);resize:both;overflow:auto}
+.card.dragging{opacity:.45}
+.card h3{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:#6b7394;margin-bottom:4px;border-bottom:1px solid #1e2030;padding-bottom:2px}
+.card .value{font-size:22px;font-weight:700;line-height:1.1}
+.card .sub{font-size:10px;color:#6b7394;margin-top:2px}
+.card .row{display:flex;justify-content:space-between;margin-top:1px}
+.card .label{color:#6b7394;font-size:9px}
+.card .val{color:#c5c8d4;font-weight:600;font-size:10px}
+.phase-a{color:#00e676}.phase-b{color:#448aff}.phase-idle{color:#6b7394}
+.pnl-pos{color:#00e676}.pnl-neg{color:#ff5252}.pnl-zero{color:#6b7394}
+.lat-good{color:#00e676}.lat-warn{color:#ffc107}.lat-bad{color:#ff5252}
+.jump-up{color:#00e676}.jump-down{color:#ff5252}
+.safe{color:#00e676;font-weight:700}.unsafe{color:#ff5252;font-weight:700}
+.spark{width:100%;height:50px;margin-top:2px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.dot-on{background:#00e676;box-shadow:0 0 6px #00e676}.dot-off{background:#6b7394}
+.log{max-height:140px;overflow-y:auto;font-size:10px}
+.log .entry{padding:2px 0;border-bottom:1px solid #1e2030}
+.wide{grid-column:span 2}.full{grid-column:1/-1}
+.header{display:flex;justify-content:space-between;align-items:center;padding:6px 12px;background:#12131d;border-bottom:1px solid #2a2d3a}
+.header h1{font-size:14px;font-weight:700;color:#e0e2f0}
+.header .conn{font-size:11px}
+.header .ctl{display:flex;align-items:center;gap:8px;font-size:11px;color:#9aa0be}
+.header select,.header button{background:#1a1d2a;color:#d6d9e8;border:1px solid #32364a;border-radius:4px;padding:2px 6px;font-size:11px}
+.header select{color-scheme:dark}
+.header select option{background:#0f1322;color:#e6e9f8}
+.header button{cursor:pointer}
+.header button.active{background:#2a3558;border-color:#5b76cf}
+.round-badge{display:inline-block;margin-left:10px;padding:2px 6px;border:1px solid #3b4262;border-radius:4px;font-size:10px;color:#aeb6d9;max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.zone{grid-column:1/-1;font-size:11px;font-weight:700;padding:4px 0 2px;color:#4a5080;border-bottom:1px solid #2a2d3a;margin-top:2px}
+.params{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:3px}
+.params .label{color:#6b7394;font-size:9px}.params .val{color:#c5c8d4;font-weight:600;font-size:10px}
+.safety-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px}
+.safety-item{background:#1e2030;padding:5px 6px;border-radius:3px;display:flex;justify-content:space-between;align-items:center}
+.safety-item .sl{font-size:9px;color:#6b7394}.safety-item .sv{font-size:13px}
+.depth-tbl{width:100%;font-size:9px;border-collapse:collapse;margin-top:3px}
+.depth-tbl td,.depth-tbl th{padding:1px 3px;text-align:right}
+.depth-tbl th{color:#6b7394;font-weight:400}
+.depth-tbl .ask{color:#ff5252}.depth-tbl .bid{color:#00e676}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>⚡ PDE Strategy — 实时监控台 (WebSocket)<span class="round-badge" id="roundBadge">Round: —</span></h1>
+  <div class="ctl">
+    <label>时间窗</label>
+    <select id="timeRange">
+      <option value="5m">5m</option>
+      <option value="15m" selected>15m</option>
+      <option value="30m">30m</option>
+      <option value="1h">1h</option>
+      <option value="6h">6h</option>
+      <option value="12h">12h</option>
+      <option value="24h">24h</option>
+    </select>
+    <label>面板大小</label>
+    <select id="panelSize">
+      <option value="sm">S</option>
+      <option value="md" selected>M</option>
+      <option value="lg">L</option>
+    </select>
+    <label>列数</label>
+    <select id="gridCols">
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+      <option value="6">6</option>
+    </select>
+    <button id="layoutEdit" type="button">布局编辑: 关</button>
+    <button id="resetPanelSize" type="button">重置面板尺寸</button>
+  </div>
+  <div class="conn"><span class="dot dot-off" id="connDot"></span><span id="connText">连接中...</span></div>
+</div>
+<div class="grid">
+
+<!-- ① 实时价格区 -->
+<div class="zone">① 实时价格区（BTC + Polymarket）</div>
+<div class="card">
+  <h3>面板1 · Binance BTC 实时价格</h3>
+  <div class="value" id="btcPrice" style="color:#f7931a">—</div>
+  <div class="sub">ΔUSD: <span id="btcDelta">0</span> | Move: <span id="btcMove">0</span> bps</div>
+  <canvas class="spark" id="btcChart"></canvas>
+</div>
+<div class="card">
+  <h3>面板2 · Polymarket UP</h3>
+  <div class="value" id="polyUpMid">—</div>
+  <div class="row"><span class="label">Bid</span><span class="val" id="polyUpBid">—</span></div>
+  <div class="row"><span class="label">Ask</span><span class="val" id="polyUpAsk">—</span></div>
+  <div class="row"><span class="label">Spread</span><span class="val" id="polyUpSpread">—</span></div>
+</div>
+<div class="card">
+  <h3>面板2 · Polymarket DOWN</h3>
+  <div class="value" id="polyDownMid">—</div>
+  <div class="row"><span class="label">Bid</span><span class="val" id="polyDownBid">—</span></div>
+  <div class="row"><span class="label">Ask</span><span class="val" id="polyDownAsk">—</span></div>
+  <div class="row"><span class="label">Spread</span><span class="val" id="polyDownSpread">—</span></div>
+</div>
+<div class="card">
+  <h3>面板3 · Binance vs Poly 价格对比</h3>
+  <canvas class="spark" id="compareChart" style="height:50px"></canvas>
+  <div class="row"><span class="label">BTC ΔUSD</span><span class="val" id="cmpBtcDelta">—</span></div>
+  <div class="row"><span class="label">Poly ΔP</span><span class="val" id="cmpPolyDelta">—</span></div>
+  <div class="row"><span class="label">Lag</span><span class="val" id="cmpLag">—</span></div>
+</div>
+
+<!-- ② 策略状态区 -->
+<div class="zone">② 策略状态区（Phase A/B + EV + 参数）</div>
+<div class="card">
+  <h3>面板4 · 当前 Phase</h3>
+  <div class="value phase-idle" id="phaseLabel">IDLE</div>
+  <div class="row"><span class="label">BTC轮次</span><span class="val" id="phaseRound">—</span></div>
+  <div class="row"><span class="label">剩余</span><span class="val" id="phaseRemaining">—</span></div>
+  <div class="row"><span class="label">A Trades</span><span class="val" id="phaseATrades">0</span></div>
+  <div class="row"><span class="label">B Trades</span><span class="val" id="phaseBTrades">0</span></div>
+  <div class="row"><span class="label">Tail Done</span><span class="val" id="phaseTailDone">No</span></div>
+</div>
+<div class="card wide">
+  <h3>面板5 · Phase A 参数（EV驱动）</h3>
+  <div class="params">
+    <div><span class="label">σ</span><div class="val" id="pSigma">—</div></div>
+    <div><span class="label">Δlog</span><div class="val" id="pDeltaLog">—</div></div>
+    <div><span class="label">z-score</span><div class="val" id="pZ">—</div></div>
+    <div><span class="label">P(UP)</span><div class="val" id="pPUp">—</div></div>
+    <div><span class="label">EV</span><div class="val" id="pEvA">—</div></div>
+    <div><span class="label">EV阈值</span><div class="val" id="pEvATh">—</div></div>
+    <div><span class="label">Speed Adv</span><div class="val" id="pSpeedAdv">—</div></div>
+    <div><span class="label">剩余</span><div class="val" id="pRemA">—</div></div>
+  </div>
+  <canvas class="spark" id="evAChart"></canvas>
+</div>
+<div class="card wide">
+  <h3>面板6 · Phase B 参数（Tail延续）</h3>
+  <div class="params">
+    <div><span class="label">ΔUSD</span><div class="val" id="pDeltaUsd">—</div></div>
+    <div><span class="label">τ (秒)</span><div class="val" id="pTau">—</div></div>
+    <div><span class="label">P(flip)</span><div class="val" id="pPFlip">—</div></div>
+    <div><span class="label">EV tail</span><div class="val" id="pEvTail">—</div></div>
+    <div><span class="label">Tail条件</span><div class="val" id="pTailCond">—</div></div>
+    <div><span class="label">Target</span><div class="val" id="pTarget">—</div></div>
+    <div><span class="label">Tail Done</span><div class="val" id="pTailDone">—</div></div>
+    <div><span class="label">剩余</span><div class="val" id="pRemB">—</div></div>
+  </div>
+  <canvas class="spark" id="evBChart"></canvas>
+</div>
+
+<!-- ③ 交易执行区 -->
+<div class="zone">③ 交易执行区（持仓 + 盈利）</div>
+<div class="card">
+  <h3>面板7 · 持仓 UP</h3>
+  <div class="row"><span class="label">状态</span><span class="val" id="posUpOpen">Closed</span></div>
+  <div class="row"><span class="label">Phase</span><span class="val" id="posUpPhase">—</span></div>
+  <div class="row"><span class="label">数量</span><span class="val" id="posUpQty">—</span></div>
+  <div class="row"><span class="label">入场价</span><span class="val" id="posUpEntry">—</span></div>
+  <div class="row"><span class="label">当前价</span><span class="val" id="posUpCurrent">—</span></div>
+  <div class="row"><span class="label">未实现PnL</span><span class="val pnl-zero" id="posUpPnl">0.00</span></div>
+  <div class="row"><span class="label">PnL%</span><span class="val pnl-zero" id="posUpPnlPct">0.0%</span></div>
+</div>
+<div class="card">
+  <h3>面板7 · 持仓 DOWN</h3>
+  <div class="row"><span class="label">状态</span><span class="val" id="posDownOpen">Closed</span></div>
+  <div class="row"><span class="label">Phase</span><span class="val" id="posDownPhase">—</span></div>
+  <div class="row"><span class="label">数量</span><span class="val" id="posDownQty">—</span></div>
+  <div class="row"><span class="label">入场价</span><span class="val" id="posDownEntry">—</span></div>
+  <div class="row"><span class="label">当前价</span><span class="val" id="posDownCurrent">—</span></div>
+  <div class="row"><span class="label">未实现PnL</span><span class="val pnl-zero" id="posDownPnl">0.00</span></div>
+  <div class="row"><span class="label">PnL%</span><span class="val pnl-zero" id="posDownPnlPct">0.0%</span></div>
+</div>
+<div class="card">
+  <h3>面板8 · 当局盈亏</h3>
+  <div class="row"><span class="label">A 已实现</span><span class="val" id="pnlAR">0.00</span></div>
+  <div class="row"><span class="label">B 已实现</span><span class="val" id="pnlBR">0.00</span></div>
+  <div class="row"><span class="label">A 未实现</span><span class="val" id="pnlAU">0.00</span></div>
+  <div class="row"><span class="label">B 未实现</span><span class="val" id="pnlBU">0.00</span></div>
+  <div class="row"><span class="label">当局PnL</span><span class="val pnl-zero" id="pnlRound">0.00</span></div>
+</div>
+<div class="card">
+  <h3>面板9 · 累积盈亏</h3>
+  <div class="row"><span class="label">A 累积</span><span class="val" id="pnlCumA">0</span></div>
+  <div class="row"><span class="label">B 累积</span><span class="val" id="pnlCumB">0</span></div>
+  <div class="row"><span class="label">总累积</span><span class="val pnl-zero" id="pnlCumTotal">0</span></div>
+  <canvas class="spark" id="pnlChart"></canvas>
+</div>
+<div class="card wide">
+  <h3>交易日志</h3>
+  <div class="log" id="tradeLog"></div>
+</div>
+
+<!-- ④ 系统健康区 -->
+<div class="zone">④ 系统健康区（延迟 + 跳变 + 深度）</div>
+<div class="card">
+  <h3>面板10 · 延迟监控</h3>
+  <div class="value" id="latencyGap">—</div>
+  <div class="sub">ms (正=Binance更快)</div>
+  <div class="row"><span class="label">BTC</span><span class="val" id="latBtcTs">—</span></div>
+  <div class="row"><span class="label">Poly</span><span class="val" id="latPolyTs">—</span></div>
+  <canvas class="spark" id="latencyChart"></canvas>
+</div>
+<div class="card">
+  <h3>面板11 · Jump Detection</h3>
+  <div class="value" id="jumpDir">—</div>
+  <div class="row"><span class="label">幅度</span><span class="val" id="jumpBps">—</span> bps</div>
+  <div class="row"><span class="label">Anchor</span><span class="val" id="jumpAnchor">—</span></div>
+  <div class="sub">最近跳变:</div>
+  <div class="log" id="jumpList" style="max-height:80px"></div>
+</div>
+<div class="card wide">
+  <h3>面板12 · Polymarket 深度监控</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+    <div><div class="label">UP 深度</div><table class="depth-tbl" id="depthUp"><tr><th>价格</th><th>数量</th><th>方向</th></tr></table></div>
+    <div><div class="label">DOWN 深度</div><table class="depth-tbl" id="depthDown"><tr><th>价格</th><th>数量</th><th>方向</th></tr></table></div>
+  </div>
+  <div class="row" style="margin-top:4px"><span class="label">预计滑点</span><span class="val" id="depthSlip">—</span></div>
+  <div class="row"><span class="label">深度满足</span><span class="val" id="depthOk">—</span></div>
+</div>
+<div class="card wide">
+  <h3>面板13 · 安全阈值监控（任一不满足→红色）</h3>
+  <div class="safety-grid">
+    <div class="safety-item"><span class="sl">Speed Advantage</span><span class="sv" id="safetySpeed">—</span></div>
+    <div class="safety-item"><span class="sl">Slippage OK</span><span class="sv" id="safetySlippage">—</span></div>
+    <div class="safety-item"><span class="sl">Volatility OK</span><span class="sv" id="safetyVol">—</span></div>
+    <div class="safety-item"><span class="sl">Depth OK</span><span class="sv" id="safetyDepth">—</span></div>
+    <div class="safety-item"><span class="sl">Jump Fresh</span><span class="sv" id="safetyJump">—</span></div>
+    <div class="safety-item"><span class="sl">Phase OK</span><span class="sv" id="safetyPhase">—</span></div>
+  </div>
+</div>
+<div class="card wide">
+  <h3>面板14 · 异常检测（自动报警）</h3>
+  <div class="log" id="anomalyLog" style="max-height:100px"></div>
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+<script>
+const WS_URL=`ws://${location.hostname||'localhost'}:8765`;
+const RANGE_MS={"5m":5*60_000,"15m":15*60_000,"30m":30*60_000,"1h":60*60_000,"6h":6*60*60_000,"12h":12*60*60_000,"24h":24*60*60_000};
+let currentRange='15m';
+let ws,rt;
+
+function gid(id){return document.getElementById(id)}
+function pnlCls(v){return v>0?'pnl-pos':v<0?'pnl-neg':'pnl-zero'}
+
+const series={btc:[],cmpBtc:[],cmpUp:[],evA:[],evB:[],pnl:[],lat:[]};
+const depthData={up:[],down:[]};
+const jumpHist=[];
+const MAX_J=15;
+const charts={};
+let layoutEditOn=false;
+let draggedCard=null;
+let renderScheduled=false;
+let lastRenderTs=0;
+const RENDER_INTERVAL_MS=120;
+
+const LS={
+  range:'pde_dashboard_range',
+  panel:'pde_dashboard_panel_size',
+  cols:'pde_dashboard_cols',
+  order:'pde_dashboard_order',
+};
+
+function pushPoint(arr,val,ts=Date.now()){
+  arr.push({x:ts,y:Number(val)||0});
+  if(arr.length>5000)arr.shift();
+}
+function filtered(arr){
+  const cut=Date.now()-RANGE_MS[currentRange];
+  return arr.filter(p=>p.x>=cut);
+}
+function labelsFor(arr){return arr.map(p=>new Date(p.x).toLocaleTimeString())}
+function valuesFor(arr){return arr.map(p=>p.y)}
+
+const CHART_SCALES={x:{type:'time',display:false,min:void 0,max:void 0},y:{display:false},xLinear:{type:'linear',display:false,position:'bottom',min:void 0,max:void 0}};
+function mkLineChart(id,color){
+  const ctx=gid(id).getContext('2d');
+  return new Chart(ctx,{type:'line',data:{datasets:[{data:[],borderColor:color,borderWidth:2,tension:0.2,pointRadius:0,parsing:false}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false}},scales:{x:{type:'time',display:false},y:{display:false}}}});
+}
+function mkDualLineChart(id,c1,c2){
+  const ctx=gid(id).getContext('2d');
+  return new Chart(ctx,{type:'line',data:{datasets:[{label:'A',data:[],borderColor:c1,borderWidth:2,tension:0.2,pointRadius:0,parsing:false},{label:'B',data:[],borderColor:c2,borderWidth:2,tension:0.2,pointRadius:0,parsing:false}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false}},scales:{x:{type:'time',display:false},y:{display:false}}}});
+}
+
+function initCharts(){
+  charts.btc=mkLineChart('btcChart','#f7931a');
+  charts.compare=mkDualLineChart('compareChart','#f7931a','#00e676');
+  charts.evA=mkLineChart('evAChart','#00e676');
+  charts.evB=mkLineChart('evBChart','#448aff');
+  charts.pnl=mkLineChart('pnlChart','#00e676');
+  charts.lat=mkLineChart('latencyChart','#ffc107');
+}
+
+function renderChartsNow(){
+  const cut=Date.now()-RANGE_MS[currentRange];
+  
+  charts.btc.data.datasets[0].data=filtered(series.btc);
+  charts.btc.update('none');
+
+  const cmpB=filtered(series.cmpBtc), cmpU=filtered(series.cmpUp);
+  charts.compare.data.datasets[0].data=cmpB;
+  charts.compare.data.datasets[1].data=cmpU;
+  charts.compare.update('none');
+
+  charts.evA.data.datasets[0].data=filtered(series.evA);
+  charts.evA.update('none');
+
+  charts.evB.data.datasets[0].data=filtered(series.evB);
+  charts.evB.update('none');
+
+  charts.pnl.data.datasets[0].data=filtered(series.pnl);
+  charts.pnl.update('none');
+
+  charts.lat.data.datasets[0].data=filtered(series.lat);
+  charts.lat.update('none');
+}
+
+function rerenderCharts(force=false){
+  const now=performance.now();
+  if(force||now-lastRenderTs>=RENDER_INTERVAL_MS){
+    lastRenderTs=now;
+    renderChartsNow();
+    // Resize all charts to fit container
+    Object.values(charts).forEach(c=>{if(c&&c.resize)c.resize();});
+    return;
+  }
+  if(renderScheduled)return;
+  renderScheduled=true;
+  const wait=Math.max(0,RENDER_INTERVAL_MS-(now-lastRenderTs));
+  setTimeout(()=>{
+    renderScheduled=false;
+    lastRenderTs=performance.now();
+    renderChartsNow();
+    Object.values(charts).forEach(c=>{if(c&&c.resize)c.resize();});
+  },wait);
+}
+
+function connect(){
+  ws=new WebSocket(WS_URL);
+  ws.onopen=()=>{gid('connDot').className='dot dot-on';gid('connText').textContent='已连接'};
+  ws.onclose=()=>{gid('connDot').className='dot dot-off';gid('connText').textContent='断开—重连中...';rt=setTimeout(connect,2000)};
+  ws.onerror=()=>ws.close();
+  ws.onmessage=e=>{try{handleMessage(JSON.parse(e.data))}catch(err){console.error(err)}};
+}
+
+function handleMessage(m){
+  switch(m.type){
+    case 'btc_tick':hBtc(m);break;
+    case 'poly_tick':hPoly(m);break;
+    case 'ev':hEv(m);break;
+    case 'phase_state':hPhase(m);break;
+    case 'position':hPos(m);break;
+    case 'latency':hLat(m);break;
+    case 'jump':hJump(m);break;
+    case 'trade':hTrade(m);break;
+    case 'safety':hSafety(m);break;
+    case 'anomaly':hAnomaly(m);break;
+    case 'depth':hDepth(m);break;
+    case 'pnl_summary':hPnl(m);break;
+    case 'rollover':hRollover(m);break;
+  }
+}
+
+function hBtc(m){
+  gid('btcPrice').textContent=(m.price||0).toFixed(2);
+  gid('btcDelta').textContent=(m.delta_usd||0).toFixed(2);
+  gid('btcMove').textContent=(m.move_bps||0).toFixed(1);
+  pushPoint(series.btc,m.price);
+  pushPoint(series.cmpBtc,m.delta_usd);
+  gid('cmpBtcDelta').textContent=(m.delta_usd||0).toFixed(2);
+  rerenderCharts();
+}
+
+function hPoly(m){
+  const p=m.token==='up'?'polyUp':'polyDown';
+  gid(p+'Mid').textContent=(m.mid||0).toFixed(4);
+  gid(p+'Bid').textContent=(m.bid||0).toFixed(4);
+  gid(p+'Ask').textContent=(m.ask||0).toFixed(4);
+  gid(p+'Spread').textContent=(m.spread_pct||0).toFixed(2)+'%';
+  if(m.token==='up'){
+    pushPoint(series.cmpUp,m.mid);
+    gid('cmpPolyDelta').textContent=(m.mid||0).toFixed(4);
+    rerenderCharts();
+  }
+}
+
+function hEv(m){
+  if(m.phase==='A'){
+    gid('pSigma').textContent=(m.sigma||0).toFixed(6);
+    gid('pDeltaLog').textContent=(m.delta_log||0).toFixed(6);
+    gid('pZ').textContent=(m.z_score||0).toFixed(4);
+    gid('pPUp').textContent=(m.p_up||0).toFixed(4);
+    gid('pEvA').textContent=(m.ev||0).toFixed(4);
+    gid('pEvA').className='val '+((m.ev||0)>0?'pnl-pos':'pnl-neg');
+    gid('pEvATh').textContent=(m.ev_threshold||0).toFixed(4);
+    gid('pSpeedAdv').textContent=m.speed_advantage?'✓':'✗';
+    gid('pSpeedAdv').className='val '+(m.speed_advantage?'pnl-pos':'pnl-neg');
+    gid('pRemA').textContent=(m.remaining||0).toFixed(0)+'s';
+    pushPoint(series.evA,m.ev||0);
+  } else {
+    gid('pDeltaUsd').textContent=(m.delta_usd||0).toFixed(2);
+    gid('pTau').textContent=(m.remaining||0).toFixed(0)+'s';
+    gid('pPFlip').textContent=(m.p_flip||0).toFixed(4);
+    gid('pEvTail').textContent=(m.ev_tail||0).toFixed(4);
+    gid('pEvTail').className='val '+((m.ev_tail||0)>0?'pnl-pos':'pnl-neg');
+    gid('pTailCond').textContent=m.tail_condition?'✓':'✗';
+    gid('pTailCond').className='val '+(m.tail_condition?'pnl-pos':'pnl-neg');
+    gid('pTarget').textContent=m.token||'—';
+    gid('pTailDone').textContent='—';
+    gid('pRemB').textContent=(m.remaining||0).toFixed(0)+'s';
+    pushPoint(series.evB,m.ev||0);
+  }
+  rerenderCharts();
+}
+
+function hPhase(m){
+  const phase=m.phase||'IDLE';
+  const el=gid('phaseLabel');
+  el.textContent=phase==='IDLE'?'IDLE':'PHASE '+phase;
+  el.className='value '+(phase==='A'?'phase-a':phase==='B'?'phase-b':'phase-idle');
+  gid('phaseRemaining').textContent=((m.remaining||0)).toFixed(0)+'s';
+  gid('phaseATrades').textContent=m.a_trades??0;
+  gid('phaseBTrades').textContent=m.b_trades??0;
+  gid('phaseTailDone').textContent=m.tail_done?'Yes':'No';
+  gid('pTailDone').textContent=m.tail_done?'Yes':'No';
+  // Update round from btc_round or extract from other fields
+  let round=m.btc_round||m.round||'—';
+  if(round==='—'&&m.phase&&m.phase!=='IDLE'){
+    // Try to construct round from available data
+    round='Active';
+  }
+  gid('phaseRound').textContent=round;
+  gid('roundBadge').textContent='Round: '+round;
+}
+
+function hPos(m){
+  const p=m.token==='up'?'posUp':'posDown';
+  gid(p+'Open').textContent=m.is_open?'Open':'Closed';
+  gid(p+'Phase').textContent=m.phase||'—';
+  gid(p+'Qty').textContent=m.quantity?m.quantity.toFixed(2):'—';
+  gid(p+'Entry').textContent=m.entry_price?m.entry_price.toFixed(4):'—';
+  gid(p+'Current').textContent=m.current_price?m.current_price.toFixed(4):'—';
+  const pnlEl=gid(p+'Pnl'),pctEl=gid(p+'PnlPct');
+  if(m.realized_pnl){
+    pnlEl.textContent='R: '+m.realized_pnl.toFixed(2);
+    pnlEl.className='val '+pnlCls(m.realized_pnl);
+  }else{
+    const u=m.unrealized_pnl||0;
+    pnlEl.textContent=u.toFixed(2);
+    pnlEl.className='val '+pnlCls(u);
+  }
+  const pct=m.pnl_pct||0;
+  pctEl.textContent=pct.toFixed(1)+'%';
+  pctEl.className='val '+pnlCls(pct);
+}
+
+function hPnl(m){
+  gid('pnlAR').textContent=(m.phase_a_realized||0).toFixed(2);
+  gid('pnlAR').className='val '+pnlCls(m.phase_a_realized||0);
+  gid('pnlBR').textContent=(m.phase_b_realized||0).toFixed(2);
+  gid('pnlBR').className='val '+pnlCls(m.phase_b_realized||0);
+  gid('pnlAU').textContent=(m.phase_a_unrealized||0).toFixed(2);
+  gid('pnlAU').className='val '+pnlCls(m.phase_a_unrealized||0);
+  gid('pnlBU').textContent=(m.phase_b_unrealized||0).toFixed(2);
+  gid('pnlBU').className='val '+pnlCls(m.phase_b_unrealized||0);
+  const rp=m.round_pnl||0;
+  gid('pnlRound').textContent=rp.toFixed(2);
+  gid('pnlRound').className='val '+pnlCls(rp);
+  gid('pnlCumA').textContent=m.cumulative_a??0;
+  gid('pnlCumB').textContent=m.cumulative_b??0;
+  const total=(m.cumulative_a||0)+(m.cumulative_b||0);
+  gid('pnlCumTotal').textContent=total;
+  gid('pnlCumTotal').className='val '+pnlCls(total);
+  pushPoint(series.pnl,total);
+  rerenderCharts();
+}
+
+function hLat(m){
+  const g=m.gap_ms||0,el=gid('latencyGap');
+  el.textContent=g.toFixed(0)+' ms';
+  el.className='value '+(g>80?'lat-good':g>20?'lat-warn':'lat-bad');
+  gid('latBtcTs').textContent=m.btc_ts?new Date(m.btc_ts*1000).toLocaleTimeString():'—';
+  gid('latPolyTs').textContent=m.poly_ts?new Date(m.poly_ts*1000).toLocaleTimeString():'—';
+  pushPoint(series.lat,g);
+  gid('cmpLag').textContent=g.toFixed(0)+'ms';
+  gid('cmpLag').className='val '+(g>80?'pnl-pos':'pnl-neg');
+  charts.lat.data.datasets[0].borderColor=g>80?'#00e676':g>20?'#ffc107':'#ff5252';
+  rerenderCharts();
+}
+
+function hJump(m){
+  const el=gid('jumpDir');
+  el.textContent=m.direction>0?'↑ UP':'↓ DOWN';
+  el.className='value '+(m.direction>0?'jump-up':'jump-down');
+  gid('jumpBps').textContent=(m.move_bps||0).toFixed(1);
+  gid('jumpAnchor').textContent=(m.anchor_price||0).toFixed(2);
+  jumpHist.unshift({d:m.direction,b:m.move_bps,t:new Date().toLocaleTimeString()});
+  if(jumpHist.length>MAX_J)jumpHist.pop();
+  gid('jumpList').innerHTML=jumpHist.map(j=>`<div class="entry"><span class="${j.d>0?'jump-up':'jump-down'}">${j.d>0?'↑':'↓'} ${j.b.toFixed(1)} bps</span><span class="label">${j.t}</span></div>`).join('');
+}
+
+function hDepth(m){
+  const tbl=gid(m.token==='up'?'depthUp':'depthDown');
+  while(tbl.rows.length>1)tbl.deleteRow(-1);
+  (m.levels||[]).forEach(l=>{
+    const r=tbl.insertRow(-1);
+    r.className=l.side==='ask'?'ask':'bid';
+    r.insertCell(0).textContent=(l.price||0).toFixed(4);
+    r.insertCell(1).textContent=(l.qty||0).toFixed(2);
+    r.insertCell(2).textContent=l.side==='ask'?'卖':'买';
+  });
+  depthData[m.token]=m.levels||[];
+  const asks=(m.levels||[]).filter(l=>l.side==='ask');
+  const other=depthData[m.token==='up'?'down':'up']||[];
+  const bestBid=(other.find(l=>l.side==='bid')||{}).price||0;
+  if(asks.length>0){
+    const spread=bestBid>0?((asks[0].price-bestBid)/asks[0].price*100):0;
+    gid('depthSlip').textContent=spread.toFixed(2)+'%';
+  }
+}
+
+function hSafety(m){
+  const r=(id,v)=>{const e=gid(id);e.textContent=v?'✓':'✗';e.className=v?'safe':'unsafe'};
+  r('safetySpeed',m.speed_advantage);r('safetySlippage',m.slippage_ok);
+  r('safetyVol',m.volatility_ok);r('safetyDepth',m.depth_ok);
+  r('safetyJump',m.jump_fresh);r('safetyPhase',m.phase_ok);
+}
+
+function hAnomaly(m){
+  const el=gid('anomalyLog'),t=new Date().toLocaleTimeString();
+  el.innerHTML=`<div class="entry"><span class="pnl-neg">⚠ ${m.anomaly_type}</span> ${m.detail} <span class="label">${t}</span></div>`+el.innerHTML;
+  while(el.children.length>30)el.removeChild(el.lastChild);
+}
+
+function hTrade(m){
+  const el=gid('tradeLog'),cl=m.phase==='A'?'phase-a':'phase-b',t=new Date().toLocaleTimeString();
+  el.innerHTML=`<div class="entry"><span class="${cl}">Phase ${m.phase}</span> ${m.side.toUpperCase()} ${m.token.toUpperCase()} @ ${m.price.toFixed(4)} qty=${m.qty.toFixed(2)} <span class="label">${t}</span></div>`+el.innerHTML;
+  while(el.children.length>50)el.removeChild(el.lastChild);
+  // Add trade markers to charts
+  const marker={x:Date.now(),y:m.price||0,trade:m};
+  if(m.token==='up'||m.token==='down'){
+    // Add to compare chart dataset
+    if(!charts.compare.data.datasets[2]){
+      charts.compare.data.datasets.push({type:'scatter',label:'trades',data:[],pointRadius:6,pointStyle:m.side==='buy'?'triangle':'triangleDown',backgroundColor:m.side==='buy'?'#00e676':'#ff5252',borderColor:'transparent'});
+    }
+    charts.compare.data.datasets[2].data.push(marker);
+    // Limit markers
+    if(charts.compare.data.datasets[2].data.length>20)charts.compare.data.datasets[2].data.shift();
+  }
+  // Also add to BTC chart
+  if(!charts.btc.data.datasets[1]){
+    charts.btc.data.datasets.push({type:'scatter',label:'trades',data:[],pointRadius:5,pointStyle:m.side==='buy'?'triangle':'triangleDown',backgroundColor:m.side==='buy'?'#00e676':'#ff5252',borderColor:'transparent'});
+  }
+  charts.btc.data.datasets[1].data.push(marker);
+  if(charts.btc.data.datasets[1].data.length>20)charts.btc.data.datasets[1].data.shift();
+}
+
+function hRollover(m){
+  const el=gid('tradeLog'),t=new Date().toLocaleTimeString();
+  el.innerHTML=`<div class="entry"><span style="color:#ffc107">🔄 Rollover</span> ${m.old_slug} → ${m.new_slug} | rounds=${m.rounds} <span class="label">${t}</span></div>`+el.innerHTML;
+}
+
+function setGridCols(cols){
+  const n=Math.max(2,Math.min(6,Number(cols)||4));
+  document.documentElement.style.setProperty('--grid-cols', String(n));
+  gid('gridCols').value=String(n);
+}
+
+function enableLayoutEdit(enable){
+  layoutEditOn=Boolean(enable);
+  const btn=gid('layoutEdit');
+  btn.textContent=`布局编辑: ${layoutEditOn?'开':'关'}`;
+  btn.classList.toggle('active', layoutEditOn);
+  document.querySelectorAll('.card').forEach(c=>{
+    c.draggable=layoutEditOn;
+    c.style.outline=layoutEditOn?'1px dashed #55608f':'none';
+  });
+}
+
+function initCardDrag(){
+  document.querySelectorAll('.card').forEach((card,idx)=>{
+    if(!card.id) card.id=`card-${idx+1}`;
+    card.draggable=false;
+    card.addEventListener('dragstart',e=>{
+      if(!layoutEditOn){e.preventDefault();return;}
+      draggedCard=card;
+      card.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+    });
+    card.addEventListener('dragend',()=>{
+      card.classList.remove('dragging');
+      draggedCard=null;
+    });
+    card.addEventListener('dragover',e=>{
+      if(!layoutEditOn)return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect='move';
+    });
+    card.addEventListener('drop',e=>{
+      if(!layoutEditOn||!draggedCard||draggedCard===card)return;
+      e.preventDefault();
+      const grid=card.parentElement;
+      const rect=card.getBoundingClientRect();
+      const before=e.clientY < rect.top + rect.height/2;
+      grid.insertBefore(draggedCard, before ? card : card.nextSibling);
+      saveCardOrder();
+    });
+  });
+}
+
+function saveCardOrder(){
+  const ids=[...document.querySelectorAll('.grid .card')].map(c=>c.id).filter(Boolean);
+  localStorage.setItem(LS.order, JSON.stringify(ids));
+}
+
+function restoreCardOrder(){
+  const raw=localStorage.getItem(LS.order);
+  if(!raw)return;
+  let ids=[];
+  try{ids=JSON.parse(raw)||[];}catch{return;}
+  const grid=document.querySelector('.grid');
+  if(!grid||!Array.isArray(ids)||!ids.length)return;
+  ids.forEach(id=>{
+    const el=document.getElementById(id);
+    if(el&&el.classList.contains('card'))grid.appendChild(el);
+  });
+}
+
+function restoreUiPrefs(){
+  const r=localStorage.getItem(LS.range);
+  if(r&&RANGE_MS[r]){currentRange=r;gid('timeRange').value=r;}
+  const p=localStorage.getItem(LS.panel);
+  if(p&&['sm','md','lg'].includes(p)){document.body.setAttribute('data-panel-size',p);gid('panelSize').value=p;}
+  const c=localStorage.getItem(LS.cols);
+  if(c){setGridCols(c);}else{setGridCols(4);}
+}
+
+function bindControls(){
+  gid('timeRange').addEventListener('change',e=>{currentRange=e.target.value;localStorage.setItem(LS.range,currentRange);rerenderCharts(true);});
+  gid('panelSize').addEventListener('change',e=>{
+    document.body.setAttribute('data-panel-size',e.target.value);
+    localStorage.setItem(LS.panel,e.target.value);
+    // Resize charts after CSS transition
+    setTimeout(()=>{
+      Object.values(charts).forEach(c=>{if(c&&c.resize)c.resize();});
+      rerenderCharts(true);
+    },150);
+  });
+  gid('gridCols').addEventListener('change',e=>{setGridCols(e.target.value);localStorage.setItem(LS.cols,String(e.target.value));setTimeout(()=>rerenderCharts(true),100);});
+  gid('layoutEdit').addEventListener('click',()=>enableLayoutEdit(!layoutEditOn));
+  gid('resetPanelSize').addEventListener('click',()=>{
+    document.querySelectorAll('.card').forEach(c=>{c.style.width='';c.style.height='';});
+    enableLayoutEdit(false);
+    localStorage.removeItem(LS.cols);
+    localStorage.removeItem(LS.panel);
+    localStorage.removeItem(LS.range);
+    localStorage.removeItem(LS.order);
+    gid('timeRange').value='15m';
+    currentRange='15m';
+    gid('panelSize').value='md';
+    document.body.setAttribute('data-panel-size','md');
+    setGridCols(4);
+    setTimeout(()=>{
+      Object.values(charts).forEach(c=>{if(c&&c.resize)c.resize();});
+      rerenderCharts(true);
+    },150);
+  });
+}
+
+restoreUiPrefs();
+initCardDrag();
+restoreCardOrder();
+initCharts();
+bindControls();
+connect();
+</script>
+</body>
+</html>

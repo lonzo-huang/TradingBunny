@@ -27,11 +27,13 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     spread_tolerance: float = 0.05
     
     # Phase parameters
-    phase_a_duration_sec: float = 240.0
+    phase_a_start_sec: float = 0.0      # Phase A 开始时间（秒），默认 0
+    phase_a_end_sec: float = 240.0      # Phase A 结束时间（秒），可配置到 300
     ev_threshold_A: float = 0.02
     ev_entry_hysteresis: float = 0.01
     ev_ema_alpha: float = 0.25
     ev_deadband: float = 0.005
+    ev_alpha: float = 0.001             # p(t) 概率更新系数: p(t) = p(t-Δt) + α·ΔBTC
     max_A_trades: int = 6
     tail_start_threshold: float = 0.1
     phase_b_momentum_threshold_usd: float = 30.0  # $30 USD absolute price offset (bidirectional)
@@ -56,6 +58,12 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     # Debug
     debug_raw_data: bool = False
     debug_ws: bool = False
+
+    # Persistence
+    persistence_enabled: bool = True
+    persistence_db_path: str = "data/pde/pde_runs.sqlite3"
+    persistence_record_market_data: bool = True
+    persistence_export_dir: str = "data/pde/exports"
 
 
 class PDEStrategyBase(Strategy):
@@ -103,6 +111,9 @@ class PDEStrategyBase(Strategy):
         }
         self.ev_ema: dict[str, float | None] = {'up': None, 'down': None}
         self._phase_a_signal_state: dict[str, str] = {'up': 'neutral', 'down': 'neutral'}
+        # Phase A: internal probability p(t), starts at 0.5
+        self._p_t: dict[str, float] = {'up': 0.5, 'down': 0.5}
+        self._btc_prev_price: float | None = None  # 用于计算 ΔBTC
         self._last_signal_eval_ts: dict[str, float] = {'up': 0.0, 'down': 0.0}
         self._last_entry_attempt_ts: dict[str, float] = {'up': 0.0, 'down': 0.0}
         self._last_entry_reject_reason: str = ""
@@ -174,6 +185,10 @@ class PDEStrategyBase(Strategy):
         
         # Live streaming
         self.live_server: Any | None = None
+
+        # Persistence
+        self.persistence_store: Any | None = None
+        self.persistence_run_id: str = ""
     
     def _calculate_round_start_ts(self) -> float:
         """Calculate aligned round start timestamp."""

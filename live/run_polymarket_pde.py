@@ -26,17 +26,17 @@ env_file = project_root / ".env"
 
 if env_file.exists():
     load_dotenv(dotenv_path=env_file)
-    print(f"✅ 成功加载环境变量文件：{env_file}")
+    print(f"[OK] 成功加载环境变量文件：{env_file}")
 else:
-    print(f"❌ 警告：未找到 .env 文件：{env_file}")
+    print(f"[WARN] 未找到 .env 文件：{env_file}")
 
 pk = os.getenv("POLYMARKET_PK")
 funder = os.getenv("POLYMARKET_FUNDER")
 if pk and funder:
-    print(f"✅ 检测到 POLYMARKET_PK (结尾...{pk[-6:]})")
-    print(f"✅ 检测到 POLYMARKET_FUNDER (结尾...{funder[-6:]})")
+    print(f"[OK] 检测到 POLYMARKET_PK (结尾...{pk[-6:]})")
+    print(f"[OK] 检测到 POLYMARKET_FUNDER (结尾...{funder[-6:]})")
 else:
-    print("⚠️ 警告：密钥仍未读取到，请检查 .env 内容格式。")
+    print("[WARN] 密钥仍未读取到，请检查 .env 内容格式。")
 
 # ==========================================================
 # Imports
@@ -48,16 +48,16 @@ try:
     try:
         from nautilus_trader.adapters.polymarket import register_polymarket_adapters
         from nautilus_trader.adapters.sandbox import register_sandbox_adapters
-        print("✅ 成功导入适配器注册函数！")
+        print("[OK] 成功导入适配器注册函数！")
     except ImportError:
-        print("⚠️ 未找到自动注册函数，将尝试手动注册...")
+        print("[WARN] 未找到自动注册函数，将尝试手动注册...")
         register_polymarket_adapters = None
         register_sandbox_adapters = None
 
-    print("✅ 成功导入 PDE 配置模块！")
+    print("[OK] 成功导入 PDE 配置模块！")
 except ModuleNotFoundError as e:
-    print(f"❌ 导入失败：{e}")
-    print("💡 解决方法：请确保 config/ 和 strategies/ 文件夹下有 __init__.py 文件！")
+    print(f"[ERROR] 导入失败：{e}")
+    print("[HINT] 解决方法：请确保 config/ 和 strategies/ 文件夹下有 __init__.py 文件！")
     sys.exit(1)
 
 
@@ -74,7 +74,7 @@ class PDETradingBot:
 
     def _signal_handler(self, signum, frame):
         if not self._shutdown:
-            print(f"\n⚠️  收到停止信号 {signum}. 正在关闭...")
+            print(f"\n[WARN] 收到停止信号 {signum}. 正在关闭...")
             self._shutdown = True
             if hasattr(self, '_loop'):
                 self._loop.call_soon_threadsafe(self._shutdown_event.set)
@@ -85,40 +85,40 @@ class PDETradingBot:
         self.setup_signal_handlers()
 
         try:
-            print("🚀 正在注册适配器工厂 (PDE Strategy)...")
+            print("[START] 正在注册适配器工厂 (PDE Strategy)...")
 
             if register_polymarket_adapters:
                 register_polymarket_adapters()
-                print("✅ Polymarket 适配器已注册")
+                print("[OK] Polymarket 适配器已注册")
             else:
-                print("⚠️ 无法自动注册 Polymarket")
+                print("[WARN] 无法自动注册 Polymarket")
 
             if register_sandbox_adapters:
                 register_sandbox_adapters()
-                print("✅ Sandbox 适配器已注册")
+                print("[OK] Sandbox 适配器已注册")
 
-            print("🚀 正在构建交易节点客户端 (PDE)...")
+            print("[START] 正在构建交易节点客户端 (PDE)...")
 
             self.node.add_data_client_factory("POLYMARKET", PolymarketLiveDataClientFactory)
             self.node.add_data_client_factory("BINANCE", BinanceLiveDataClientFactory)
-            print("✅ Binance 数据客户端工厂已添加")
+            print("[OK] Binance 数据客户端工厂已添加")
 
             if "SANDBOX" in self.config.exec_clients:
                 self.node.add_exec_client_factory("SANDBOX", SandboxLiveExecClientFactory)
-                print("✅ Sandbox 执行客户端工厂已添加")
+                print("[OK] Sandbox 执行客户端工厂已添加")
 
             if "POLYMARKET" in self.config.exec_clients:
                 self.node.add_exec_client_factory("POLYMARKET", PolymarketLiveExecClientFactory)
-                print("✅ Polymarket 执行客户端工厂已添加")
+                print("[OK] Polymarket 执行客户端工厂已添加")
 
             self.node.build()
 
-            print("✅ PDE 客户端构建成功！正在启动引擎...")
+            print("[OK] PDE 客户端构建成功！正在启动引擎...")
 
             node_task = asyncio.create_task(self.node.run_async())
             shutdown_task = asyncio.create_task(self._shutdown_event.wait())
 
-            print("✅ PDE 节点运行中。按 Ctrl+C 停止...")
+            print("[OK] PDE 节点运行中。按 Ctrl+C 停止...")
 
             done, pending = await asyncio.wait(
                 [node_task, shutdown_task],
@@ -138,7 +138,7 @@ class PDETradingBot:
                     pass
 
         except Exception as e:
-            print(f"❌ 严重错误：{e}")
+            print(f"[ERROR] 严重错误：{e}")
             import traceback
             traceback.print_exc()
             raise
@@ -147,16 +147,16 @@ class PDETradingBot:
 
     async def stop(self):
         if self.node:
-            print("🛑 正在停止 PDE 交易节点...")
+            print("[STOP] 正在停止 PDE 交易节点...")
             try:
                 self.node.stop()
                 self.node.dispose()
-                print("✅ PDE 交易节点已停止。")
+                print("[OK] PDE 交易节点已停止。")
             except Exception as e:
-                print(f"⚠️  停止节点时出错：{e}")
+                print(f"[WARN] 停止节点时出错：{e}")
 
         if self._shutdown:
-            print("👋 程序即将退出...")
+            print("[BYE] 程序即将退出...")
 
 
 async def main():
@@ -169,7 +169,7 @@ async def main():
     )
     args = parser.parse_args()
 
-    print(f"🎯 PDE 策略启动模式: {args.mode}")
+    print(f"[START] PDE 策略启动模式: {args.mode}")
     config = configure_pde_node(execution_mode=args.mode)
     bot = PDETradingBot(config)
     await bot.run()

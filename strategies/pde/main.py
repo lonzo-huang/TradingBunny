@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import sys
 import math
+import uuid
+import json
 from datetime import datetime, timezone, timedelta
 
 # Add parent directory to path for imports
@@ -58,9 +60,38 @@ class PolymarketPDEStrategy(
     
     def on_start(self) -> None:
         """Strategy startup."""
-        self.log.info("🚀 PDE Strategy (Modular) starting...")
+        self.log.info("[START] PDE Strategy (Modular) starting...")
         self.log.info(f"   Base slug: {self.config.market_base_slug}")
         self.log.info(f"   Interval: {self.config.market_interval_minutes}min")
+
+        if getattr(self.config, 'persistence_enabled', False):
+            try:
+                from utils.pde_persistence import PDEPersistenceStore
+
+                db_path = str(getattr(self.config, 'persistence_db_path', 'data/pde/pde_runs.sqlite3'))
+                run_tag = getattr(self.config, 'order_id_tag', 'pde')
+                now_utc = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+                self.persistence_run_id = f"pde_{run_tag}_{now_utc}_{uuid.uuid4().hex[:8]}"
+                self.persistence_store = PDEPersistenceStore(db_path)
+                self.persistence_store.start_run(
+                    run_id=self.persistence_run_id,
+                    mode='live_node',
+                    strategy='PolymarketPDEStrategy',
+                    metadata={
+                        'market_base_slug': self.config.market_base_slug,
+                        'interval_minutes': self.config.market_interval_minutes,
+                        'phase_a_start_sec': getattr(self.config, 'phase_a_start_sec', 0.0),
+                        'phase_a_end_sec': getattr(self.config, 'phase_a_end_sec', 240.0),
+                        'threshold_phase_b_usd': self.config.phase_b_momentum_threshold_usd,
+                    },
+                )
+                self.log.info(
+                    f"[PERSIST] Persistence enabled db={db_path} run_id={self.persistence_run_id}"
+                )
+            except Exception as e:
+                self.persistence_store = None
+                self.persistence_run_id = ""
+                self.log.warning(f"[WARN] Persistence init failed: {e}")
         
         # Setup metrics
         self._setup_prometheus_metrics()
@@ -72,10 +103,10 @@ class PolymarketPDEStrategy(
         # Subscribe to BTC feed
         if self.config.btc_price_source == "mid":
             self.subscribe_quote_ticks(self.btc_instrument_id)
-            self.log.info("📡 Subscribed BTC quote ticks (mid mode)")
+            self.log.info("[SERVER] Subscribed BTC quote ticks (mid mode)")
         else:
             self.subscribe_trade_ticks(self.btc_instrument_id)
-            self.log.info("📡 Subscribed BTC trade ticks")
+            self.log.info("[SERVER] Subscribed BTC trade ticks")
         
         # Initialize market subscription
         self._subscribe_current_market()
@@ -87,14 +118,15 @@ class PolymarketPDEStrategy(
             interval=timedelta(seconds=1),
             callback=self._on_rollover_timer,
         )
-        self.log.info("⏰ Rollover timer started (1s interval)")
+        self.log.info("[TIMER] Rollover timer started (1s interval)")
         
         # Start live server
         try:
             from utils.live_stream_server import LiveStreamServer
             self.live_server = LiveStreamServer(host="0.0.0.0", port=8765)
+            self.live_server.set_param_update_handler(self._apply_runtime_params)
             self.live_server.start()
-            self.log.info("📡 Live stream server started on :8765")
+            self.log.info("[OK] Live stream server started on :8765")
             
             # Push initial phase state so dashboard shows Round immediately
             if self.current_market_slug:
@@ -104,13 +136,31 @@ class PolymarketPDEStrategy(
                     btc_round=self.current_market_slug
                 )
         except Exception as e:
-            self.log.warning(f"⚠️ Live server failed to start: {e}")
+            self.log.warning(f"[WARN] Live server failed to start: {e}")
+
+        self._load_runtime_params_file()
     
     def on_stop(self) -> None:
         """Strategy shutdown."""
+        if getattr(self, 'persistence_store', None):
+            try:
+                self.persistence_store.finish_run(
+                    run_id=self.persistence_run_id,
+                    summary={
+                        'round_pnl': self.round_pnl,
+                        'total_pnl': self.total_pnl,
+                        'a_trades': self.A_trades,
+                        'b_trades': self.B_trades,
+                    },
+                )
+                self.persistence_store.close()
+                self.log.info(f"[PERSIST] Persistence closed run_id={self.persistence_run_id}")
+            except Exception as e:
+                self.log.warning(f"[WARN] Persistence close failed: {e}")
+
         if hasattr(self, 'live_server') and self.live_server:
             self.live_server.stop()
-            self.log.info("📡 Live server stopped")
+            self.log.info("[OK] Live server stopped")
         
         # Unsubscribe all
         if self.instrument:
@@ -118,7 +168,7 @@ class PolymarketPDEStrategy(
         if self.down_instrument:
             self.unsubscribe_quote_ticks(self.down_instrument.id)
         self.unsubscribe_trade_ticks(self.btc_instrument_id)
-        self.log.info("🛑 PDE Strategy stopped")
+        self.log.info("[STOP] PDE Strategy stopped")
     
     def on_reset(self) -> None:
         """Reset strategy state."""
@@ -136,6 +186,68 @@ class PolymarketPDEStrategy(
         self.A_trades = 0
         self.B_trades = 0
         self.tail_trade_done = False
+        self._p_t = {'up': 0.5, 'down': 0.5}  # Reset p(t) probabilities
+        self._btc_prev_price = None
+
+    def _runtime_params_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config', 'pde_runtime_overrides.json')
+
+    def _load_runtime_params_file(self) -> None:
+        path = self._runtime_params_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                params = json.load(f)
+            if isinstance(params, dict) and params:
+                result = self._apply_runtime_params(params)
+                self.log.info(f"[CONFIG] Runtime params loaded: applied={list(result.get('applied', {}).keys())}")
+        except Exception as e:
+            self.log.warning(f"[WARN] Failed loading runtime params file: {e}")
+
+    def _apply_runtime_params(self, params: dict) -> dict:
+        """Apply mutable runtime params to current strategy config.
+
+        Returns a dict: {"applied": {...}, "rejected": {...}}.
+        """
+        allowed_casts = {
+            'ev_threshold_A': float,
+            'ev_entry_hysteresis': float,
+            'ev_deadband': float,
+            'phase_b_momentum_threshold_usd': float,
+            'take_profit_pct': float,
+            'stop_loss_pct': float,
+            'spread_tolerance': float,
+            'max_A_trades': int,
+            'per_trade_usd': float,
+            'signal_eval_interval_sec': float,
+            'entry_retry_cooldown_sec': float,
+            'close_retry_interval_sec': float,
+        }
+        applied: dict = {}
+        rejected: dict = {}
+
+        for key, val in (params or {}).items():
+            caster = allowed_casts.get(key)
+            if caster is None:
+                rejected[key] = 'not_runtime_mutable'
+                continue
+            if not hasattr(self.config, key):
+                rejected[key] = 'config_missing'
+                continue
+            try:
+                cast_val = caster(val)
+                setattr(self.config, key, cast_val)
+                applied[key] = cast_val
+            except Exception as e:
+                rejected[key] = f'cast_error:{e}'
+
+        if applied:
+            self.log.info(f"[CONFIG] Runtime params updated: {applied}")
+        if rejected:
+            self.log.warning(f"[WARN] Runtime params rejected: {rejected}")
+
+        return {'applied': applied, 'rejected': rejected}
     
     def _process_tick_for_strategy(self, tick, is_up: bool) -> None:
         """Main tick processing - combines signal and execution logic."""
@@ -173,8 +285,10 @@ class PolymarketPDEStrategy(
         elapsed = now_ts - self.start_ts
         remaining = self.config.market_interval_minutes * 60 - elapsed
         
-        # Determine phase
-        in_phase_a = elapsed < self.config.phase_a_duration_sec
+        # Determine phase using configurable time window
+        phase_a_start = getattr(self.config, 'phase_a_start_sec', 0.0)
+        phase_a_end = getattr(self.config, 'phase_a_end_sec', 240.0)
+        in_phase_a = phase_a_start <= elapsed < phase_a_end
         phase = 'A' if in_phase_a else 'B'
         
         # Calculate delta vs BTC
@@ -183,52 +297,95 @@ class PolymarketPDEStrategy(
         else:
             delta_pct = 0.0
         
+        # Calculate BTC tick-to-tick change for p(t) update
+        if self._btc_prev_price and self._btc_prev_price > 0:
+            delta_btc_pct = (self.btc_price - self._btc_prev_price) / self._btc_prev_price
+        else:
+            delta_btc_pct = 0.0
+        self._btc_prev_price = self.btc_price
+        
         # Calculate volatility
         sigma = self._calculate_sigma(token_key)
         
         # Calculate EV
         ev, p_flip, tail_cond = self._calculate_ev(
-            token_key, mid, sigma, delta_pct, remaining, in_phase_a
+            token_key, mid, sigma, delta_pct, remaining, in_phase_a, delta_btc_pct
         )
         
+        # Phase B: Trend-Reinforcement with time-weighted score
+        # trend_score = |ΔP| × w(t), where w(t) = (t - 240) / 60
+        phase_b_start = 240.0  # Phase B always starts at 240s
+        phase_b_end = 300.0    # Phase B always ends at 300s
+        
+        # Time weight: linear from 0 (at 240s) to 1 (at 300s)
+        if elapsed >= phase_b_start:
+            time_weight = min(1.0, (elapsed - phase_b_start) / (phase_b_end - phase_b_start))
+        else:
+            time_weight = 0.0
+        
+        # Absolute deviation from BTC start price
+        if self.btc_start_price and self.btc_start_price > 0:
+            delta_p = self.btc_price - self.btc_start_price  # Can be positive or negative
+            delta_p_pct = delta_p / self.btc_start_price
+        else:
+            delta_p = 0.0
+            delta_p_pct = 0.0
+        
+        # Trend strength score: |ΔP| × w(t)
+        trend_score = abs(delta_p_pct) * time_weight
+        
+        # Threshold check
         threshold_usd = float(getattr(self.config, 'phase_b_momentum_threshold_usd', 30.0))
         btc_price_for_th = self.btc_price or self.btc_start_price or 85000
-        phase_b_momentum_threshold = threshold_usd / max(btc_price_for_th, 1)
-        phase_b_vol_time_scaled = max(0.0, float(sigma)) * math.sqrt(max(0.0, float(remaining)) / 300.0)
-        phase_b_z_score = abs(delta_pct) / max(phase_b_vol_time_scaled, 1e-4)
-        phase_b_p_cont = min(0.95, 0.5 + 0.45 * (1.0 - 1.0 / (1.0 + phase_b_z_score)))
-        phase_b_target = 'up' if delta_pct > 0 else 'down' if delta_pct < 0 else 'flat'
-        if abs(delta_pct) < phase_b_momentum_threshold:
+        threshold_pct = threshold_usd / max(btc_price_for_th, 1)
+        
+        phase_b_target = 'up' if delta_p > 0 else 'down' if delta_p < 0 else 'flat'
+        if trend_score < threshold_pct:
             phase_b_target = 'none'
 
         if (not in_phase_a) and (self.config.debug_raw_data or self.config.debug_ws):
             delta_usd = delta_pct * (self.btc_price or self.btc_start_price or 85000)
             self.log.info(
                 f"[PHASE_B_DEBUG] token={token_key} delta_usd={delta_usd:+.1f} "
-                f"sigma={sigma:.6f} rem={remaining:.1f}s z={phase_b_z_score:.3f} "
-                f"p_cont={phase_b_p_cont:.3f} ev={ev:.4f} tail_cond={tail_cond} "
+                f"trend_score={trend_score:.6f} time_weight={time_weight:.3f} "
+                f"ev={ev:.4f} tail_cond={tail_cond} "
                 f"th=${threshold_usd:.0f} target={phase_b_target}"
             )
 
-        # Push to dashboard
+        # Push to dashboard with new metrics
+        # Phase A: p(t) internal probability, q(t) market price
+        p_t = getattr(self, '_p_t', {}).get(token_key, 0.5)
+        q_t = mid  # Market price as q(t)
+        ev_alpha = getattr(self.config, 'ev_alpha', 0.001)
+        
         self._push_ev(
             token=token_key,
             phase=phase,
             ev=ev,
             p_up=0.5 + delta_pct,
             sigma=sigma,
-            p_flip=p_flip if in_phase_a else phase_b_p_cont,
-            p_cont=phase_b_p_cont,
+            p_flip=p_flip if in_phase_a else 0.0,
             remaining=remaining,
             tau=remaining,
-            z_score=phase_b_z_score if not in_phase_a else 0.0,
             delta_pct=delta_pct,
             delta_usd=delta_pct,
-            ev_tail=(phase_b_p_cont - mid) if not in_phase_a else 0.0,
+            # Phase A new metrics
+            p_t=p_t,
+            q_t=q_t,
+            ev_alpha=ev_alpha,
+            # Phase B new metrics
+            time_weight=time_weight if not in_phase_a else 0.0,
+            trend_score=trend_score if not in_phase_a else 0.0,
+            delta_p=delta_p if not in_phase_a else 0.0,
+            delta_p_pct=delta_p_pct if not in_phase_a else 0.0,
             target=phase_b_target,
             momentum_threshold=threshold_usd,
             tail_done=self.tail_trade_done,
-            tail_condition=tail_cond
+            tail_condition=tail_cond,
+            # Phase window info
+            phase_a_start=phase_a_start,
+            phase_a_end=phase_a_end,
+            elapsed=elapsed
         )
         
         # Trading logic
@@ -269,7 +426,17 @@ class PolymarketPDEStrategy(
                     state = 'neutral'
             self._phase_a_signal_state[token_key] = state
 
-            if state == 'bullish' and prev_state != 'bullish':
+            # Phase A: EV arbitrage - bidirectional trading
+            # EV > entry_threshold -> Buy (market underpricing)
+            # EV < -entry_threshold -> Sell (market overpricing)
+            if ev > entry_threshold:
+                signal_side = 'buy'
+            elif ev < -entry_threshold:
+                signal_side = 'sell'
+            else:
+                signal_side = None
+            
+            if signal_side and prev_state == 'neutral':
                 if pos.get('open') or pos.get('pending_open'):
                     return
                 if _has_other_open_or_pending(token_key):
@@ -277,17 +444,16 @@ class PolymarketPDEStrategy(
                     return
                 if self.A_trades >= self.config.max_A_trades:
                     return
-                side = 'buy'
                 last_ts = self._last_entry_attempt_ts.get(token_key, 0.0)
                 if now_ts - last_ts < self.config.entry_retry_cooldown_sec:
                     return
                 self._last_entry_attempt_ts[token_key] = now_ts
                 self.log.info(
-                    f"[TRADE] Phase A BULL signal: {token_key} ev={ev:.4f} > {entry_threshold:.4f} "
-                    f"(base={phase_a_threshold:.4f})"
+                    f"[TRADE] Phase A {signal_side.upper()} signal: {token_key} ev={ev:.4f} "
+                    f"threshold=±{entry_threshold:.4f}"
                 )
-                self.log.info(f"[TRADE] Attempting {token_key} {side} @ {mid:.4f}")
-                result = self._enter_position(token_key, side, mid, self.config.per_trade_usd / mid, phase)
+                self.log.info(f"[TRADE] Attempting {token_key} {signal_side} @ {mid:.4f}")
+                result = self._enter_position(token_key, signal_side, mid, self.config.per_trade_usd / mid, phase)
                 if result:
                     self.log.info(f"[TRADE] Entry result: {result}")
                 else:
@@ -308,9 +474,9 @@ class PolymarketPDEStrategy(
                     self.log.warning(f"[TRADE] Phase A timeout close failed: {token_key}")
                 return
 
-            # Phase B: momentum continuation
-            self.log.debug(f"[TRADE] Phase B: tail_cond={tail_cond} tail_done={self.tail_trade_done}")
-            if tail_cond and not self.tail_trade_done:
+            # Phase B: momentum continuation based on trend_score
+            self.log.debug(f"[TRADE] Phase B: trend_score={trend_score:.6f} threshold={threshold_pct:.6f} target={phase_b_target}")
+            if phase_b_target != 'none' and not self.tail_trade_done:
                 trend_match = (
                     (token_key == 'up' and delta_pct > 0) or
                     (token_key == 'down' and delta_pct < 0)
@@ -323,7 +489,7 @@ class PolymarketPDEStrategy(
                         return
                     self.log.info(
                         f"[TRADE] Phase B momentum lock: {token_key} "
-                        f"| delta={delta_pct:.4f} | ev={ev:.4f}"
+                        f"| delta={delta_pct:.4f} | trend_score={trend_score:.6f}"
                     )
                     result = self._enter_position(token_key, 'buy', mid, self.config.per_trade_usd / mid, phase)
                     if result:
@@ -333,7 +499,12 @@ class PolymarketPDEStrategy(
         # Push phase state periodically (every 3 seconds)
         if not hasattr(self, '_last_phase_push_ts') or now_ts - self._last_phase_push_ts >= 3.0:
             self._last_phase_push_ts = now_ts
-            self._push_phase_state(phase, remaining)
+            self._push_phase_state(
+                phase, remaining,
+                phase_a_start=phase_a_start,
+                phase_a_end=phase_a_end,
+                elapsed=elapsed
+            )
     
     def check_rollover(self) -> None:
         """Check and handle market rollover."""
@@ -406,7 +577,7 @@ class PolymarketPDEStrategy(
                     and (now_ts - self.last_quote_tick_ts) <= 5):
                 self._post_rollover_subscribe_pending = False
                 self._post_rollover_retry_count = 0
-                self.log.info("✅ Post-rollover market data resumed")
+                self.log.info("[OK] Post-rollover market data resumed")
             elif (
                 self._post_rollover_retry_count < self._post_rollover_retry_max
                 and (now_ts - self._last_post_rollover_retry_ts) >= self._post_rollover_retry_interval_sec
@@ -414,7 +585,7 @@ class PolymarketPDEStrategy(
                 self._post_rollover_retry_count += 1
                 self._last_post_rollover_retry_ts = now_ts
                 self.log.warning(
-                    f"🔁 Post-rollover subscribe retry "
+                    f"[RETRY] Post-rollover subscribe retry "
                     f"{self._post_rollover_retry_count}/{self._post_rollover_retry_max}"
                 )
                 self._force_resubscribe()
@@ -430,7 +601,7 @@ class PolymarketPDEStrategy(
                 and self._resubscribe_attempts < 3):
             self._resubscribe_attempts += 1
             self.log.warning(
-                f"⚠️  No quote tick for {now_ts - self.last_quote_tick_ts:.0f}s — "
+                f"[WARN] No quote tick for {now_ts - self.last_quote_tick_ts:.0f}s - "
                 f"forcing resubscribe (attempt {self._resubscribe_attempts}/3)"
             )
             self._force_resubscribe()

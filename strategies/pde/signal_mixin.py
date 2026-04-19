@@ -52,10 +52,10 @@ class PDESignalMixin:
             buckets = data.get('probs') or data.get('data') or {}
             self.flip_probs = buckets
 
-            self.log.info(f"📊 Loaded flip stats: {len(buckets)} buckets")
+            self.log.info(f"[STATS] Loaded flip stats: {len(buckets)} buckets")
             return data
         except Exception as e:
-            self.log.error(f"❌ Failed to load flip stats: {e}")
+            self.log.error(f"[ERROR] Failed to load flip stats: {e}")
             return {}
     
     def _schedule_flip_stats_refresh(self) -> None:
@@ -65,7 +65,7 @@ class PDESignalMixin:
             return
         
         self._next_flip_stats_refresh_ts = self.clock.timestamp() + interval_min * 60
-        self.log.info(f"📅 Scheduled flip stats refresh in {interval_min}min")
+        self.log.info(f"[SCHED] Scheduled flip stats refresh in {interval_min}min")
     
     def _check_flip_stats_refresh(self) -> None:
         """Check if it's time to refresh flip stats."""
@@ -93,21 +93,40 @@ class PDESignalMixin:
             self.flip_stats = stats
             self.flip_probs = flip_probs_to_lookup(probs)
             
-            self.log.info(f"✅ Refreshed flip stats: {len(self.flip_probs)} buckets")
+            self.log.info(f"[OK] Refreshed flip stats: {len(self.flip_probs)} buckets")
         except Exception as e:
-            self.log.error(f"❌ Flip stats refresh failed: {e}")
+            self.log.error(f"[ERROR] Flip stats refresh failed: {e}")
     
+    def _update_p_t(self, token_key: str, delta_btc_pct: float) -> float:
+        """Update internal probability p(t) using BTC price changes.
+        
+        Formula: p(t) = p(t-Δt) + α · ΔBTC
+        """
+        alpha = float(getattr(self.config, 'ev_alpha', 0.001))
+        prev_p = getattr(self, '_p_t', {}).get(token_key, 0.5)
+        
+        # For 'up' token: BTC up → probability up
+        # For 'down' token: BTC up → probability down
+        if token_key == 'up':
+            new_p = prev_p + alpha * delta_btc_pct
+        else:  # 'down'
+            new_p = prev_p - alpha * delta_btc_pct
+        
+        # Clamp to [0.05, 0.95]
+        new_p = max(0.05, min(0.95, new_p))
+        
+        # Store updated value
+        if hasattr(self, '_p_t'):
+            self._p_t[token_key] = new_p
+        return new_p
+
     def _calculate_ev(self, token_key: str, current_price: float, 
                      sigma: float, delta_pct: float, remaining_sec: float,
-                     in_phase_a: bool) -> tuple[float, float, bool]:
+                     in_phase_a: bool, delta_btc_pct: float = 0.0) -> tuple[float, float, bool]:
         """Calculate expected value for a position.
         
         Returns: (ev, p_flip, tail_condition)
         """
-        # Base probability from delta
-        p_up = 0.5 + delta_pct if token_key == 'up' else 0.5 - delta_pct
-        p_up = max(0.05, min(0.95, p_up))  # Clamp to reasonable range
-        
         # Get flip probability
         p_flip = 0.0
         if self.flip_probs:
@@ -116,14 +135,17 @@ class PDESignalMixin:
         
         # Calculate EV
         if in_phase_a:
-            # Phase A: momentum following
-            ev_raw = self._ev_phase_a(p_up, current_price)
+            # Phase A: EV arbitrage with p(t) - q(t)
+            # Update internal probability p(t) based on BTC changes
+            p_t = self._update_p_t(token_key, delta_btc_pct)
+            # q(t) is the market price (current_price)
+            ev_raw = self._ev_phase_a(p_t, current_price)
             ev = self._smooth_phase_a_ev(token_key, ev_raw)
             return ev, p_flip, False
         else:
-            # Phase B: trend continuation
+            # Phase B: trend reinforcement (handled separately in main.py)
             ev, tail_cond = self._ev_phase_b(
-                p_up, p_flip, current_price, sigma, delta_pct, remaining_sec
+                0.5, p_flip, current_price, sigma, delta_pct, remaining_sec
             )
             return ev, p_flip, tail_cond
     
@@ -137,17 +159,17 @@ class PDESignalMixin:
         else:
             return "high"
     
-    def _ev_phase_a(self, p_up: float, price: float) -> float:
-        """Phase A EV for BUYing this token.
+    def _ev_phase_a(self, p_t: float, market_price: float) -> float:
+        """Phase A EV: p(t) - q(t)
 
-        `p_up` here is already token-specific probability from `_calculate_ev`:
-        - up token   -> p_up = P(up)
-        - down token -> p_up = P(down)
-
-        Binary token expected value per share when buying is:
-            EV = P(win) - price
+        p(t): internal probability estimate (updated by BTC micro-moves)
+        q(t): market-implied probability (market price)
+        
+        Returns:
+            EV > 0: market underpricing -> buy
+            EV < 0: market overpricing -> sell (for arbitrage)
         """
-        return p_up - price
+        return p_t - market_price
     
     def _ev_phase_b(
         self,

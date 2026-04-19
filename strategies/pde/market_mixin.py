@@ -62,6 +62,51 @@ class PDEMarketMixin:
         current_start = int(now_ts // interval_sec) * interval_sec
         next_start = current_start + interval_sec
         return current_start, next_start
+
+    def _extract_token_id_int(self, inst: Instrument) -> int:
+        """Extract numeric token id from instrument id string."""
+        token_id = str(inst.id).split("-")[-1].split(".")[0]
+        try:
+            return int(token_id)
+        except Exception:
+            return 0
+
+    def _extract_outcome_label(self, inst: Instrument) -> str:
+        """Best-effort extract outcome label for one instrument."""
+        info = getattr(inst, 'info', {}) or {}
+
+        # Direct single-value fields first.
+        for key in ("outcome", "token_outcome", "side", "label", "name"):
+            val = str(info.get(key, "")).strip().lower()
+            if val:
+                return val
+
+        # Some payloads keep outcomes under nested tokens list.
+        inst_token_id = str(inst.id).split("-")[-1].split(".")[0]
+        tokens = info.get("tokens")
+        if isinstance(tokens, list):
+            for t in tokens:
+                if not isinstance(t, dict):
+                    continue
+                token_key = str(
+                    t.get("token_id")
+                    or t.get("tokenId")
+                    or t.get("clob_token_id")
+                    or t.get("clobTokenId")
+                    or ""
+                )
+                if token_key and token_key != inst_token_id:
+                    continue
+                outcome = str(
+                    t.get("outcome")
+                    or t.get("name")
+                    or t.get("label")
+                    or ""
+                ).strip().lower()
+                if outcome:
+                    return outcome
+
+        return ""
     
     def _find_market_instruments_by_slug(self, slug: str) -> tuple[Instrument | None, Instrument | None]:
         """Find Up/Down instruments matching slug using instrument info."""
@@ -75,55 +120,54 @@ class PDEMarketMixin:
             market_slug = info.get("market_slug", "")
             if market_slug == slug:
                 matching_instruments.append(inst)
-                self.log.debug(f"   ✓ Found match: {inst.id} (outcome={info.get('outcome')})")
+                self.log.debug(f"   [OK] Found match: {inst.id} (outcome={info.get('outcome')})")
         
         if not matching_instruments:
-            self.log.info(f"❌ No instruments found for slug: {slug}")
+            self.log.info(f"[ERROR] No instruments found for slug: {slug}")
             return None, None
         
-        self.log.info(f"✓ Found {len(matching_instruments)} instruments for {slug}")
+        self.log.info(f"[OK] Found {len(matching_instruments)} instruments for {slug}")
         
-        # Identify Up vs Down by outcome field
+        # Identify Up vs Down by explicit Polymarket outcome labels
         up_matched = None
         down_matched = None
         
         for inst in matching_instruments:
-            info = getattr(inst, 'info', {}) or {}
-            outcome = info.get("outcome", "").lower()
-            
-            if outcome == "up" or outcome == "yes":
+            outcome = self._extract_outcome_label(inst)
+
+            if outcome in ("up", "yes"):
                 up_matched = inst
-            elif outcome == "down" or outcome == "no":
+            elif outcome in ("down", "no"):
                 down_matched = inst
-        
-        # Fallback: sort by token_id if outcome matching failed
-        # Note: On Polymarket, larger token_id = UP, smaller = DOWN
+
         if up_matched is None or down_matched is None:
-            instruments_with_tokens = []
-            for inst in matching_instruments:
-                token_id = str(inst.id).split("-")[-1].split(".")[0] if hasattr(inst, 'id') else ""
-                try:
-                    token_int = int(token_id) if token_id.isdigit() else 0
-                except:
-                    token_int = 0
-                instruments_with_tokens.append((token_int, inst))
+            outcomes = [self._extract_outcome_label(inst) for inst in matching_instruments]
+            instruments_with_tokens = [(self._extract_token_id_int(inst), inst) for inst in matching_instruments]
+            instruments_with_tokens.sort(key=lambda x: x[0])
 
-            instruments_with_tokens.sort(key=lambda x: x[0])  # ascending: [small, large]
-
-            # Polymarket: larger token_id = UP, smaller = DOWN
-            if up_matched is None and len(instruments_with_tokens) >= 2:
-                up_matched = instruments_with_tokens[-1][1]   # largest = UP
-            if down_matched is None and len(instruments_with_tokens) >= 1:
-                down_matched = instruments_with_tokens[0][1]  # smallest = DOWN
-
-            self.log.info(f"📊 Token mapping (fallback): UP={instruments_with_tokens[-1][0] if len(instruments_with_tokens)>=2 else 'N/A'}, DOWN={instruments_with_tokens[0][0] if instruments_with_tokens else 'N/A'}")
+            # Deterministic fallback for markets where adapter omits outcome labels.
+            # Keep legacy convention in this repo: lower token_id -> UP, higher token_id -> DOWN.
+            if len(instruments_with_tokens) >= 2:
+                up_matched = instruments_with_tokens[0][1]
+                down_matched = instruments_with_tokens[-1][1]
+                self.log.warning(
+                    f"[WARN] Missing outcome labels for {slug}. outcomes={outcomes}. "
+                    f"Fallback token_id mapping applied: UP={instruments_with_tokens[0][0]}, "
+                    f"DOWN={instruments_with_tokens[-1][0]}"
+                )
+            else:
+                self.log.warning(
+                    f"[WARN] Missing outcome labels for {slug}. outcomes={outcomes}. "
+                    "Insufficient instruments for fallback mapping."
+                )
+                return None, None
 
         return up_matched, down_matched
     
     def _subscribe_current_market(self) -> None:
         """Subscribe to current market Up/Down tokens."""
         slug = self._get_current_slug()
-        self.log.info(f"📡 Attempting to subscribe to market: {slug}")
+        self.log.info(f"[SERVER] Attempting to subscribe to market: {slug}")
         if slug == self.current_market_slug:
             self.log.info(f"   Already subscribed to {slug}, skipping")
             return
@@ -149,13 +193,13 @@ class PDEMarketMixin:
             self._rollover_retry_count += 1
             if self._rollover_retry_count <= 3:
                 self.log.warning(
-                    f"⚠️  Instruments for {slug} not found "
+                    f"[WARN]  Instruments for {slug} not found "
                     f"(retry {self._rollover_retry_count}/3), refreshing..."
                 )
                 if not self._next_refresh_pending:
                     self._next_refresh_pending = True
                     self.request_instruments(Venue("POLYMARKET"))
-                    self.log.info(f"🔄 Requested instrument refresh for next market: {slug}")
+                    self.log.info(f"[REFRESH] Requested instrument refresh for next market: {slug}")
             return
         
         # Found both instruments, commit the rollover
@@ -166,6 +210,13 @@ class PDEMarketMixin:
         
         self.instrument = up_matched
         self.down_instrument = down_matched
+
+        up_outcome = str((getattr(up_matched, 'info', {}) or {}).get('outcome', '')).strip().lower()
+        down_outcome = str((getattr(down_matched, 'info', {}) or {}).get('outcome', '')).strip().lower()
+        self.log.info(
+            f"🧭 Mapping {slug}: up_id={up_matched.id} (outcome={up_outcome}) | "
+            f"down_id={down_matched.id} (outcome={down_outcome})"
+        )
         
         # Subscribe to new instruments
         self.subscribe_quote_ticks(up_matched.id)
@@ -175,7 +226,7 @@ class PDEMarketMixin:
         self.subscribe_order_book_deltas(down_matched.id, book_type=BookType.L2_MBP)
         
         self.log.info(
-            f"✅ Subscribed to {slug}: "
+            f"[OK] Subscribed to {slug}: "
             f"up={up_matched.id}, down={down_matched.id}"
         )
         
@@ -189,12 +240,12 @@ class PDEMarketMixin:
         # Initialize start_ts so tick processing doesn't skip phase_state push
         if not hasattr(self, 'start_ts') or self.start_ts is None:
             self.start_ts = self._calculate_round_start_ts()
-            self.log.info(f"⏱️ Initialized start_ts={self.start_ts}")
+            self.log.info(f"[TIME] Initialized start_ts={self.start_ts}")
         
         self._post_rollover_subscribe_pending = True
         self._post_rollover_switch_ts = self.clock.timestamp()
         self._post_rollover_retry_count = 0
-        self._last_post_rollover_retry_ts = 0.0
+        self._last_post_rollover_retry_ts = self._post_rollover_switch_ts
     
     def _prewarm_next_market(self) -> None:
         """Pre-subscribe to next market before rollover (10s lead time)."""
@@ -268,42 +319,33 @@ class PDEMarketMixin:
             self.subscribe_quote_ticks(self.down_instrument.id)
             self.subscribe_order_book_deltas(self.down_instrument.id, book_type=BookType.L2_MBP)
         
-        self.log.info(f"✅ Activated prewarmed market: {target_slug} (subscribed to data feeds)")
+        self.log.info(f"[OK] Activated prewarmed market: {target_slug} (subscribed to data feeds)")
         return True
     
     def _force_resubscribe(self) -> None:
         """Force resubscribe to recover from WebSocket disconnect."""
-        for inst in (self.instrument, self.down_instrument):
-            if inst is None:
-                continue
-            try:
-                self.unsubscribe_quote_ticks(inst.id)
-                self.unsubscribe_order_book_deltas(inst.id)
-            except Exception:
-                pass
-        
-        # Re-subscribe
+        # Subscribe-only retry to avoid unsubscribe errors while WS is not connected yet.
         if self.instrument:
             self.subscribe_quote_ticks(self.instrument.id)
             self.subscribe_order_book_deltas(self.instrument.id, book_type=BookType.L2_MBP)
-            self.log.info(f"🔄 Resubscribed Up: {self.instrument.id}")
+            self.log.info(f"[REFRESH] Resubscribed Up: {self.instrument.id}")
         
         if self.down_instrument:
             self.subscribe_quote_ticks(self.down_instrument.id)
             self.subscribe_order_book_deltas(self.down_instrument.id, book_type=BookType.L2_MBP)
-            self.log.info(f"🔄 Resubscribed Down: {self.down_instrument.id}")
+            self.log.info(f"[REFRESH] Resubscribed Down: {self.down_instrument.id}")
     
     def _on_instruments_refreshed(self, request_id) -> None:
         """Callback after instrument refresh completes."""
         self._next_refresh_pending = False
-        self.log.info("🔄 Provider refresh complete, retrying subscription...")
+        self.log.info("[REFRESH] Provider refresh complete, retrying subscription...")
         self._subscribe_current_market()
     
     def _schedule_next_provider_refresh(self) -> None:
         """Schedule proactive provider refresh."""
         interval_min = getattr(self.config, 'proactive_refresh_interval_min', 10.0)
         self._next_provider_refresh_ts = self.clock.timestamp() + interval_min * 60
-        self.log.info(f"📅 Scheduled provider refresh in {interval_min}min")
+        self.log.info(f"[SCHED] Scheduled provider refresh in {interval_min}min")
     
     def _cleanup_expired_instruments(self) -> None:
         """Clean up expired instruments from cache."""

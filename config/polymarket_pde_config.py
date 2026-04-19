@@ -144,33 +144,51 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                 strategy_path="strategies.pde.main:PolymarketPDEStrategy",
                 config_path="strategies.pde.main:PolymarketPDEStrategyConfig",
                 config={
-                    "market_base_slug": "btc-updown-5m",
-                    "market_interval_minutes": 5,
-                    "trade_amount_usd": 100.0,
-                    "auto_rollover": True,
-                    "ev_threshold_A": 0.05,
-                    "ev_entry_hysteresis": 0.01,
-                    "ev_ema_alpha": 0.25,
-                    "ev_deadband": 0.005,
-                    "spread_tolerance": 0.03,
-                    "signal_eval_interval_sec": 0.5,
-                    "close_retry_interval_sec": 3.0,
-                    "max_A_trades": 6,
-                    "phase_b_momentum_threshold_usd": 30.0,  # $30 USD absolute price offset (bidirectional)
-                    "take_profit_pct": 0.30,
-                    "stop_loss_pct": 0.20,
-                    "delta_tail_min": 5.0,
-                    "tail_return": 0.10,
-                    "ev_threshold_tail": 0.0,
-                    "btc_jump_threshold_bps": 5.0,
-                    "jump_staleness_sec": 10.0,
-                    "max_slippage_pct": 0.10,
-                    "volatility_window": 60,
-                    "flip_stats_path": "config/flip_stats.json",
-                    "flip_stats_lookback": 200,
-                    "flip_stats_refresh_minutes": 60,
-                    "debug_raw_data": True,
-                    "order_id_tag": "002",
+                    # ===== 市场配置 =====
+                    "market_base_slug": "btc-updown-5m",    # 市场基础标识，用于匹配Polymarket事件
+                    "market_interval_minutes": 5,           # 每个交易区间的时长（分钟），如5分钟
+                    "trade_amount_usd": 100.0,              # 单笔交易金额（USD），每次开仓的仓位大小
+                    "auto_rollover": True,                  # 是否自动切换到下一个区间，True=自动 rollover
+
+                    # ===== Phase A EV套利参数 =====
+                    "ev_threshold_A": 0.05,                 # Phase A EV阈值，|EV|>0.05才触发交易
+                    "ev_entry_hysteresis": 0.01,            # EV入场滞回区间，防止频繁进出
+                    "ev_ema_alpha": 0.25,                   # EV平滑系数，越大对新数据越敏感
+                    "ev_deadband": 0.005,                   # EV死区，小于此值的波动被忽略
+                    "ev_alpha": 0.001,                      # p(t)内部概率更新系数，BTC微动*p(t)更新
+                    "phase_a_start_sec": 0.0,               # Phase A开始时间（秒），区间开始后的第N秒
+                    "phase_a_end_sec": 240.0,               # Phase A结束时间（秒），默认240秒=4分钟
+
+                    # ===== Phase B 趋势跟踪参数 =====
+                    "phase_b_momentum_threshold_usd": 10.0, # Phase B动量阈值（USD），BTC偏移>$10才交易
+                    "take_profit_pct": 0.30,                # 止盈百分比，盈利30%时自动平仓
+                    "stop_loss_pct": 0.20,                  # 止损百分比，亏损20%时自动平仓
+                    "delta_tail_min": 5.0,                  # 尾部事件最小偏移（USD），用于尾部风险管理
+                    "tail_return": 0.10,                    # 尾部事件预期收益（10%），用于EV计算
+                    "ev_threshold_tail": 0.0,               # 尾部事件EV阈值
+
+                    # ===== 风控与执行参数 =====
+                    "max_A_trades": 6,                      # Phase A最大交易次数，防止过度交易
+                    "spread_tolerance": 0.03,               # 价差容忍度（3%），超过此价差不交易
+                    "max_slippage_pct": 0.10,               # 最大滑点（10%），超过此滑点拒绝成交
+                    "signal_eval_interval_sec": 0.5,        # 信号评估间隔（秒），每0.5秒检查一次
+                    "close_retry_interval_sec": 3.0,        # 平仓重试间隔（秒），平仓失败3秒后重试
+                    "btc_jump_threshold_bps": 5.0,          # BTC跳跃检测阈值（基点），5bps=0.05%
+                    "jump_staleness_sec": 10.0,             # 跳跃检测数据过期时间（秒）
+
+                    # ===== 波动率与统计参数 =====
+                    "volatility_window": 60,                # 波动率计算窗口（秒），60秒历史数据
+                    "flip_stats_path": "config/flip_stats.json",  # 翻转统计文件路径
+                    "flip_stats_lookback": 200,             # 翻转统计回溯次数，最近200次
+                    "flip_stats_refresh_minutes": 60,       # 翻转统计刷新间隔（分钟）
+
+                    # ===== 调试与持久化参数 =====
+                    "debug_raw_data": True,                 # 是否启用原始数据调试日志
+                    "order_id_tag": "002",                  # 订单ID标签，用于区分不同策略实例
+                    "persistence_enabled": True,            # 是否启用数据库持久化
+                    "persistence_db_path": "data/pde/pde_runs.sqlite3",  # SQLite数据库路径
+                    "persistence_record_market_data": True, # 是否记录市场数据（tick/quotes）
+                    "persistence_export_dir": "data/pde/exports",      # 数据导出目录
                 },
             ),
         ],

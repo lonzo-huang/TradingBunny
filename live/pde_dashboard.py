@@ -237,12 +237,12 @@ def format_number(n: float | None, decimals: int = 2) -> str:
 def index() -> str:
     """List all runs."""
     runs = query_db("""
-        SELECT run_id, started_at, finished_at, mode, strategy,
+        SELECT run_id, started_at_iso, ended_at_iso, mode, strategy,
                (SELECT COUNT(*) FROM orders WHERE orders.run_id = runs.run_id) as order_count,
                (SELECT COUNT(*) FROM fills WHERE fills.run_id = runs.run_id) as fill_count,
                (SELECT COUNT(*) FROM positions WHERE positions.run_id = runs.run_id) as position_count
         FROM runs
-        ORDER BY started_at DESC
+        ORDER BY started_at_ns DESC
     """)
     
     content = """
@@ -262,13 +262,13 @@ def index() -> str:
     """
     
     for run in runs:
-        status = "Finished" if run['finished_at'] else "Running"
+        status = "Finished" if run['ended_at_iso'] else "Running"
         status_badge = f'<span class="badge badge-filled">{status}</span>' if status == "Finished" else f'<span class="badge badge-submitted">{status}</span>'
         
         content += f"""
                 <tr>
                     <td><code>{run['run_id'][:50]}...</code></td>
-                    <td>{format_ts(run['started_at'])}</td>
+                    <td>{format_ts(run['started_at_iso'])}</td>
                     <td>{status_badge}</td>
                     <td>{run['mode']}</td>
                     <td>{run['order_count']}</td>
@@ -310,11 +310,11 @@ def run_overview(run_id: str) -> str:
         <div class="stats-grid">
             <div class="stat-box">
                 <div class="stat-label">Started</div>
-                <div class="stat-value">{format_ts(run['started_at'])}</div>
+                <div class="stat-value">{format_ts(run['started_at_iso'])}</div>
             </div>
             <div class="stat-box">
                 <div class="stat-label">Status</div>
-                <div class="stat-value">{'Finished' if run['finished_at'] else 'Running'}</div>
+                <div class="stat-value">{'Finished' if run['ended_at_iso'] else 'Running'}</div>
             </div>
             <div class="stat-box">
                 <div class="stat-label">Mode</div>
@@ -360,7 +360,7 @@ def run_overview(run_id: str) -> str:
         
         <h3>Metadata</h3>
         <div class="card">
-            <pre>{json.dumps(json.loads(run['metadata'] or '{}'), indent=2)}</pre>
+            <pre>{json.dumps(json.loads(run['metadata_json'] or '{}'), indent=2)}</pre>
         </div>
     """
     

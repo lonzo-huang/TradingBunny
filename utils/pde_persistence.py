@@ -110,7 +110,7 @@ class PDEPersistenceStore:
                 self._get(event, "client_order_id"),
                 self._get(event, "trade_id") or self._get(event, "venue_trade_id"),
                 self._get(event, "instrument_id"),
-                self._get(event, "order_side"),
+                self._to_side_str(self._get(event, "order_side") or self._get(event, "is_buy")),
                 self._to_float(self._get(event, "last_qty")) or self._to_float(self._get(event, "quantity")),
                 self._to_float(self._get(event, "last_px")) or self._to_float(self._get(event, "price")),
                 self._to_float(self._get(event, "commission")) or self._to_float(self._get(event, "fee")),
@@ -129,6 +129,8 @@ class PDEPersistenceStore:
         avg_price: float,
         unrealized_pnl: float,
         realized_pnl: float,
+        round_slug: str = "",
+        entry_context: dict | None = None,
     ) -> None:
         ts_ns, ts_iso = self._extract_event_time(event)
         payload = self._to_json_dict(event)
@@ -138,8 +140,8 @@ class PDEPersistenceStore:
                 run_id, ts_ns, ts_iso, event_type,
                 token, phase, instrument_id,
                 position_size, avg_price, unrealized_pnl, realized_pnl,
-                payload_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payload_json, round_slug, entry_context_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -154,6 +156,8 @@ class PDEPersistenceStore:
                 unrealized_pnl,
                 realized_pnl,
                 json.dumps(payload, ensure_ascii=False),
+                round_slug or "",
+                json.dumps(entry_context or {}, ensure_ascii=False),
             ),
         )
 
@@ -320,7 +324,9 @@ class PDEPersistenceStore:
                     avg_price REAL,
                     unrealized_pnl REAL,
                     realized_pnl REAL,
-                    payload_json TEXT
+                    payload_json TEXT,
+                    round_slug TEXT DEFAULT '',
+                    entry_context_json TEXT DEFAULT '{}'
                 );
 
                 CREATE TABLE IF NOT EXISTS pnl (
@@ -369,7 +375,28 @@ class PDEPersistenceStore:
                 CREATE INDEX IF NOT EXISTS idx_account_run_ts ON account_states(run_id, ts_ns);
                 """
             )
+            # Migration: add new columns to existing databases
+            for col, definition in [
+                ("round_slug", "TEXT DEFAULT ''"),
+                ("entry_context_json", "TEXT DEFAULT '{}'"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
+                except Exception:
+                    pass  # Column already exists
             self._conn.commit()
+
+    @staticmethod
+    def _to_side_str(value: Any) -> str:
+        """Normalise order side to 'BUY' or 'SELL' string."""
+        if value is None:
+            return ""
+        s = str(value).upper()
+        if s in ("BUY", "1", "TRUE"):
+            return "BUY"
+        if s in ("SELL", "2", "FALSE"):
+            return "SELL"
+        return s  # e.g. already "BUY"/"SELL" string
 
     @staticmethod
     def _to_float(value: Any) -> float | None:

@@ -103,6 +103,8 @@ class PDEExecutionMixin:
         avg_price: float,
         unrealized_pnl: float,
         realized_pnl: float,
+        round_slug: str = "",
+        entry_context: dict | None = None,
     ) -> None:
         store = getattr(self, 'persistence_store', None)
         run_id = getattr(self, 'persistence_run_id', '')
@@ -121,6 +123,8 @@ class PDEExecutionMixin:
                 avg_price=avg_price,
                 unrealized_pnl=unrealized_pnl,
                 realized_pnl=realized_pnl,
+                round_slug=round_slug,
+                entry_context=entry_context,
             )
             self.log.info(f"[PERSIST-OK] Position {event_type} persisted")
         except Exception as e:
@@ -308,6 +312,7 @@ class PDEExecutionMixin:
 
         phase = pos.get('phase') or 'A'
         exposure = pos['entry_price'] * pos['size']
+        round_slug = getattr(self, 'current_market_slug', '') or ''
         self._persist_position_event(
             event_type='position_opened',
             token=token_key,
@@ -317,6 +322,7 @@ class PDEExecutionMixin:
             avg_price=pos['entry_price'],
             unrealized_pnl=0.0,
             realized_pnl=0.0,
+            round_slug=round_slug,
         )
         self._persist_pnl_snapshot(
             event_type='position_opened',
@@ -356,6 +362,7 @@ class PDEExecutionMixin:
         phase = pos.get('phase') or 'A'
         unrealized = float(getattr(event, 'unrealized_pnl', 0.0) or 0.0)
         avg_px = float(getattr(event, 'avg_px_open', pos.get('entry_price', 0.0)) or 0.0)
+        round_slug = getattr(self, 'current_market_slug', '') or ''
 
         self._persist_position_event(
             event_type='position_changed',
@@ -366,6 +373,7 @@ class PDEExecutionMixin:
             avg_price=avg_px,
             unrealized_pnl=unrealized,
             realized_pnl=0.0,
+            round_slug=round_slug,
         )
         self._persist_pnl_snapshot(
             event_type='position_changed',
@@ -411,6 +419,7 @@ class PDEExecutionMixin:
         realized = float(event.realized_pnl)
         self.round_pnl += realized
         self.total_pnl += realized
+        round_slug = getattr(self, 'current_market_slug', '') or ''
 
         self._persist_position_event(
             event_type='position_closed',
@@ -421,6 +430,7 @@ class PDEExecutionMixin:
             avg_price=float(getattr(event, 'avg_px_open', 0.0) or 0.0),
             unrealized_pnl=0.0,
             realized_pnl=realized,
+            round_slug=round_slug,
         )
         self._persist_pnl_snapshot(
             event_type='position_closed',
@@ -591,7 +601,9 @@ class PDEExecutionMixin:
         return all_closed
     
     def _enter_position(self, token_key: str, side: str, price: float,
-                        size: float, phase: str) -> bool:
+                        size: float, phase: str,
+                        ev: float = 0.0, delta_pct: float = 0.0,
+                        btc_price: float = 0.0) -> bool:
         """Enter a new position if risk limits allow."""
         now_ts = self.clock.timestamp()
 
@@ -653,16 +665,26 @@ class PDEExecutionMixin:
             'pending_open_ts': now_ts,
         })
         
-        # Persist position opened event immediately (don't rely on callback)
+        # Persist entry request with full decision context (not a duplicate of on_position_opened)
+        round_slug = getattr(self, 'current_market_slug', '') or ''
         self._persist_position_event(
-            event_type='position_opened',
+            event_type='position_requested',
             token=token_key,
             phase=phase,
-            event={'price': price, 'size': size, 'side': side},
+            event={'price': price, 'size': size, 'side': side,
+                   'label': f'enter_{token_key}_{phase}'},
             position_size=size,
             avg_price=price,
             unrealized_pnl=0.0,
             realized_pnl=0.0,
+            round_slug=round_slug,
+            entry_context={
+                'ev': round(ev, 6),
+                'delta_pct': round(delta_pct, 6),
+                'btc_price': round(btc_price, 2),
+                'label': f'enter_{token_key}_{phase}',
+                'round_slug': round_slug,
+            },
         )
         
         # Update trade counters

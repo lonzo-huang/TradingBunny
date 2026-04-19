@@ -455,7 +455,10 @@ class PolymarketPDEStrategy(
                     f"threshold=±{entry_threshold:.4f}"
                 )
                 self.log.info(f"[TRADE] Attempting {token_key} {signal_side} @ {mid:.4f}")
-                result = self._enter_position(token_key, signal_side, mid, self.config.per_trade_usd / mid, phase)
+                result = self._enter_position(
+                    token_key, signal_side, mid, self.config.per_trade_usd / mid, phase,
+                    ev=ev, delta_pct=delta_pct, btc_price=self.btc_price or 0.0,
+                )
                 if result:
                     self.log.info(f"[TRADE] Entry result: {result}")
                 else:
@@ -487,7 +490,10 @@ class PolymarketPDEStrategy(
                         f"[TRADE] Phase B momentum lock: {token_key} "
                         f"| delta={delta_pct:.4f} | trend_score={trend_score:.6f}"
                     )
-                    result = self._enter_position(token_key, 'buy', mid, self.config.per_trade_usd / mid, phase)
+                    result = self._enter_position(
+                        token_key, 'buy', mid, self.config.per_trade_usd / mid, phase,
+                        ev=ev, delta_pct=delta_pct, btc_price=self.btc_price or 0.0,
+                    )
                     if result:
                         self.tail_trade_done = True
                         self.log.info("[TRADE] Phase B momentum entry success")

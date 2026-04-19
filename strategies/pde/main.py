@@ -215,6 +215,9 @@ class PolymarketPDEStrategy(
             'ev_threshold_A': float,
             'ev_entry_hysteresis': float,
             'ev_deadband': float,
+            'phase_a_start_sec': float,
+            'phase_a_end_sec': float,
+            'phase_b_start_sec': float,
             'phase_b_momentum_threshold_usd': float,
             'phase_b_max_token_price': float,
             'take_profit_pct': float,
@@ -315,13 +318,14 @@ class PolymarketPDEStrategy(
         )
         
         # Phase B: Trend-Reinforcement with time-weighted score
-        # trend_score = |ΔP| × w(t), where w(t) = (t - 240) / 60
-        phase_b_start = 240.0  # Phase B always starts at 240s
-        phase_b_end = 300.0    # Phase B always ends at 300s
-        
-        # Time weight: linear from 0 (at 240s) to 1 (at 300s)
-        if elapsed >= phase_b_start:
-            time_weight = min(1.0, (elapsed - phase_b_start) / (phase_b_end - phase_b_start))
+        # trend_score = |ΔP| × w(t), where w(t) ramps from 0 to 1 across the Phase B window
+        phase_b_start = getattr(self.config, 'phase_b_start_sec', 240.0)
+        in_phase_b = elapsed >= phase_b_start
+        phase_b_end = self.config.market_interval_minutes * 60  # Phase B ends at round end
+
+        # Time weight: linear from 0 (at phase_b_start) to 1 (at round end)
+        if in_phase_b:
+            time_weight = min(1.0, (elapsed - phase_b_start) / max(phase_b_end - phase_b_start, 1.0))
         else:
             time_weight = 0.0
         
@@ -347,7 +351,7 @@ class PolymarketPDEStrategy(
         if trend_score < threshold_pct:
             phase_b_target = 'none'
 
-        if (not in_phase_a) and (self.config.debug_raw_data or self.config.debug_ws):
+        if in_phase_b and (self.config.debug_raw_data or self.config.debug_ws):
             delta_usd = delta_pct * (self.btc_price or self.btc_start_price or 85000)
             self.log.info(
                 f"[PHASE_B_DEBUG] token={token_key} delta_usd={delta_usd:+.1f} "
@@ -471,11 +475,10 @@ class PolymarketPDEStrategy(
                 self.log.debug(
                     f"[TRADE] Phase A: state={state} ev={ev:.4f} entry={entry_threshold:.4f} exit={exit_threshold:.4f}, no entry"
                 )
-        else:
-            # Phase A positions are now allowed to carry into Phase B
-            # They will be force-closed before the 5-minute rollover (handled in check_rollover)
 
+        if in_phase_b:
             # Phase B: momentum continuation based on trend_score
+            # Completely independent from Phase A — no shared state, no conflict checks
             self.log.debug(f"[TRADE] Phase B: trend_score={trend_score:.6f} threshold={threshold_pct:.6f} target={phase_b_target}")
             if phase_b_target != 'none' and not self.tail_trade_done:
                 trend_match = (
@@ -594,7 +597,7 @@ class PolymarketPDEStrategy(
             self._prewarm_next_market()
 
         # Force-close Phase A positions when approaching round end (< 5 seconds remaining)
-        # Phase B positions are held until TP/SL or round end (all-or-nothing)
+        # Phase B positions are intentionally held to rollover (no TP/SL), closed by check_rollover
         if seconds_to_roll < 5.0:
             phase_a_positions = [
                 k for k in ('up', 'down')

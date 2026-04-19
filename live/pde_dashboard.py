@@ -219,12 +219,12 @@ BASE_TEMPLATE = """
 
 
 def format_ts(ts_iso: str | None) -> str:
-    """Format timestamp for display."""
+    """Format timestamp for display (converted to local timezone)."""
     if not ts_iso:
         return "-"
     try:
         dt = datetime.fromisoformat(ts_iso.replace('Z', '+00:00'))
-        return dt.strftime('%H:%M:%S')
+        return dt.astimezone().strftime('%H:%M:%S')
     except:
         return ts_iso[:19]
 
@@ -322,20 +322,31 @@ def index() -> str:
     """List all runs."""
     runs = query_db("""
         SELECT run_id, started_at_iso, ended_at_iso, mode, strategy,
-               (SELECT COUNT(*) FROM orders WHERE orders.run_id = runs.run_id) as order_count,
+               -- 唯一提交的订单数（每笔只算 order_submitted 一行）
+               (SELECT COUNT(*) FROM orders WHERE orders.run_id = runs.run_id
+                AND event_type = 'order_submitted') as order_count,
+               -- 实际成交数
                (SELECT COUNT(*) FROM fills WHERE fills.run_id = runs.run_id) as fill_count,
-               (SELECT COUNT(*) FROM positions WHERE positions.run_id = runs.run_id) as position_count,
+               -- 唯一仓位数（每个仓位只算 position_requested 一行）
+               (SELECT COUNT(*) FROM positions WHERE positions.run_id = runs.run_id
+                AND event_type = 'position_requested') as position_count,
                (
                    SELECT COALESCE(SUM(realized_pnl), 0)
                    FROM positions p2
                    WHERE p2.run_id = runs.run_id
                      AND p2.event_type = 'position_closed'
                ) as total_pnl,
+               -- 未成交数：提交了但在 fills 表里找不到对应成交记录的订单
                (
                    SELECT COUNT(*)
                    FROM orders o2
                    WHERE o2.run_id = runs.run_id
-                     AND COALESCE(o2.status, '') NOT IN ('FILLED', 'CANCELED', 'REJECTED')
+                     AND o2.event_type = 'order_submitted'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM fills f2
+                         WHERE f2.run_id = runs.run_id
+                           AND f2.client_order_id = o2.client_order_id
+                     )
                ) as unfilled_order_count
         FROM runs
         ORDER BY started_at_ns DESC
@@ -882,8 +893,7 @@ def run_pnl(run_id: str) -> str:
         WHERE run_id = ? AND phase = 'B' AND event_type = 'position_closed'
     """, (run_id,), one=True)['val']
 
-    final_a = total_a[-1] if total_a else realized_a_total
-    final_b = total_b[-1] if total_b else realized_b_total
+    grand_total = realized_a_total + realized_b_total
 
     content = f"""
         <h2>PnL by Phase</h2>
@@ -901,21 +911,22 @@ def run_pnl(run_id: str) -> str:
             <table>
                 <tr>
                     <th>Phase</th>
-                    <th>Data Points</th>
-                    <th>Total Realized (Closed Trades)</th>
-                    <th>Running Total PnL (Last)</th>
+                    <th>PnL 快照数</th>
+                    <th>已实现 PnL（已平仓）</th>
                 </tr>
                 <tr>
                     <td><span class="badge badge-a">Phase A</span></td>
                     <td>{len(pnl_a)}</td>
                     <td class="{'positive' if realized_a_total >= 0 else 'negative'}">{format_number(realized_a_total)}</td>
-                    <td class="{'positive' if final_a >= 0 else 'negative'}">{format_number(final_a)}</td>
                 </tr>
                 <tr>
                     <td><span class="badge badge-b">Phase B</span></td>
                     <td>{len(pnl_b)}</td>
                     <td class="{'positive' if realized_b_total >= 0 else 'negative'}">{format_number(realized_b_total)}</td>
-                    <td class="{'positive' if final_b >= 0 else 'negative'}">{format_number(final_b)}</td>
+                </tr>
+                <tr style="border-top: 2px solid #30363d; font-weight: bold;">
+                    <td colspan="2">合计</td>
+                    <td class="{'positive' if grand_total >= 0 else 'negative'}">{format_number(grand_total)}</td>
                 </tr>
             </table>
         </div>

@@ -26,9 +26,10 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     max_slippage: float = 0.005
     spread_tolerance: float = 0.05
     
-    # Phase parameters
-    phase_a_start_sec: float = 0.0      # Phase A 开始时间（秒），默认 0
-    phase_a_end_sec: float = 240.0      # Phase A 结束时间（秒），可配置到 300
+    # Phase parameters — A 和 B 时间窗口完全独立配置，互不共用
+    phase_a_start_sec: float = 0.0      # Phase A 入场窗口开始（秒）
+    phase_a_end_sec: float = 240.0      # Phase A 停止新建仓时间（秒），已持仓继续运行直到自身出场条件
+    phase_b_start_sec: float = 240.0    # Phase B 入场窗口开始（秒），独立于 phase_a_end_sec
     ev_threshold_A: float = 0.02
     ev_entry_hysteresis: float = 0.01
     ev_ema_alpha: float = 0.25

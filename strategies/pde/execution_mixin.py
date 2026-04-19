@@ -775,6 +775,11 @@ class PDEExecutionMixin:
 
         self._push_live_position_mark(token_key, mark_price)
 
+        # Phase B 仓位：不做任何中途退出，持仓至轮次结束由 rollover 强制平仓
+        # 目的是完整吃趋势利润（token 向 $1 收敛）
+        if pos.get('phase') == 'B':
+            return False
+
         trigger_price = self._trigger_price_for_exit(pos, bid, ask, mark_price)
         entry = float(pos.get('entry_price', 0.0))
         if entry <= 0:
@@ -824,14 +829,17 @@ class PDEExecutionMixin:
         if pos.get('close_pending'):
             return False
 
-        # For Phase B tail trades, keep TP/SL active but ignore EV-based stop exits.
-        if phase == 'B' and pos.get('phase') == 'B':
-            return False
-        
-        # Exit if EV turns negative significantly
-        if ev < -0.01:  # -1% threshold
+        # EV-based exit: 方向相关
+        # 多头（buy）：EV 变负说明资产不再被低估 → 退出
+        # 空头（sell）：EV 变正说明资产不再被高估 → 退出
+        side = pos.get('side')
+        ev_exit = (side == 'buy' and ev < -0.01) or (side == 'sell' and ev > 0.01)
+        if ev_exit:
             if self._close_position(token_key, trigger_price, f"exit_ev_{token_key}"):
-                self.log.info(f"💨 Exit requested {token_key.upper()} @ {trigger_price:.4f} (EV={ev:.4f})")
+                self.log.info(
+                    f"[EXIT] EV反转退出 {token_key.upper()} side={side} ev={ev:.4f} "
+                    f"@ {trigger_price:.4f}"
+                )
                 return True
             return False
         

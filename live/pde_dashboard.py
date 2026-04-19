@@ -18,7 +18,19 @@ from pathlib import Path
 from flask import Flask, render_template_string, g
 
 app = Flask(__name__)
+app.config['PROPAGATE_EXCEPTIONS'] = True
 DB_PATH: str = "data/pde/pde_runs.sqlite3"
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Handle all exceptions and return detailed error page."""
+    import traceback
+    error_msg = f"""
+    <h1>500 Internal Server Error</h1>
+    <pre>{traceback.format_exc()}</pre>
+    """
+    return error_msg, 500
 
 
 def get_db() -> sqlite3.Connection:
@@ -182,7 +194,7 @@ BASE_TEMPLATE = """
 <body>
     <header>
         <div class="container">
-            <h1>📊 PDE Trading Dashboard</h1>
+            <h1>[PDE] Trading Dashboard</h1>
             <div class="nav">
                 <a href="/" class="{% if active_page == 'runs' %}active{% endif %}">Runs</a>
                 {% if run_id %}
@@ -633,9 +645,9 @@ def main() -> None:
     global DB_PATH
     DB_PATH = args.db
     
-    print(f"🚀 Starting PDE Dashboard")
-    print(f"📊 Database: {DB_PATH}")
-    print(f"🌐 URL: http://{args.host}:{args.port}")
+    print(f"[START] PDE Dashboard starting")
+    print(f"[DB] Database: {DB_PATH}")
+    print(f"[URL] http://{args.host}:{args.port}")
     print()
     print("Press Ctrl+C to stop")
     

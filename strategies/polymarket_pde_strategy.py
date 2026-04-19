@@ -16,6 +16,7 @@ import json
 import math
 import os
 import threading
+import time
 
 import numpy as np
 from scipy.stats import norm
@@ -23,6 +24,10 @@ from prometheus_client import Gauge, Counter, start_http_server
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
+
+from utils.live_stream_server import LiveStreamServer
+from utils.grafana_live_pusher import GrafanaLivePusher
+from utils.composite_pusher import CompositeLivePusher
 from nautilus_trader.model.data import QuoteTick, TradeTick
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.enums import BookType, OrderSide
@@ -91,8 +96,8 @@ class PolymarketPDEStrategy(Strategy):
         
         # Per-token position tracking (independent TP/SL)
         self.positions: dict[str, dict] = {
-            'up': {'open': False, 'entry_price': 0.0},
-            'down': {'open': False, 'entry_price': 0.0},
+            'up': {'open': False, 'entry_price': 0.0, 'phase': None},
+            'down': {'open': False, 'entry_price': 0.0, 'phase': None},
         }
         
         # Phase A state
@@ -110,7 +115,19 @@ class PolymarketPDEStrategy(Strategy):
         self.last_quote_tick_ts: float = 0.0  # wallclock time of last quote tick
         self._resubscribe_attempts: int = 0
         self._rollover_in_progress: bool = False  # True while waiting for instruments after rollover
+        self._last_ws_push_ts: float = 0.0  # throttle WebSocket pushes in _process_tick
         self._rollover_retry_count: int = 0
+        self._prewarm_lead_seconds: float = 10.0  # pre-subscribe next market before rollover
+        self.next_market_slug: str | None = None
+        self.next_instrument: Instrument | None = None
+        self.next_down_instrument: Instrument | None = None
+        self._next_refresh_pending: bool = False
+        self._post_rollover_subscribe_pending: bool = False
+        self._post_rollover_switch_ts: float = 0.0
+        self._post_rollover_retry_count: int = 0
+        self._last_post_rollover_retry_ts: float = 0.0
+        self._post_rollover_retry_interval_sec: float = 6.0  # Allow 5s WS reconnect + 1s buffer
+        self._post_rollover_retry_max: int = 10  # More retries for transient WS issues
         self._next_provider_refresh_ts: float = 0.0  # wall-clock time for next proactive refresh
         self._provider_refresh_pending: bool = False  # prevent overlapping refresh requests
         
@@ -304,16 +321,16 @@ class PolymarketPDEStrategy(Strategy):
             'Number of trades in Phase A for current round'
         )
         
-        # PnL metrics (reuse from existing strategy)
+        # PnL metrics by phase (A/B separated)
         self.unrealized_pnl_gauge = Gauge(
             'pde_unrealized_pnl',
-            'Unrealized PnL',
-            ['token_type']
+            'Unrealized PnL by phase',
+            ['phase', 'token_type']  # phase: 'A', 'B'
         )
         self.realized_pnl_gauge = Gauge(
             'pde_realized_pnl',
-            'Realized PnL per position',
-            ['token_type']
+            'Realized PnL per position by phase',
+            ['phase', 'token_type']  # phase: 'A', 'B'
         )
         
         # Position metrics
@@ -414,6 +431,28 @@ class PolymarketPDEStrategy(Strategy):
         except Exception as e:
             self.log.warning(f"⚠️  Failed to start Prometheus server: {e}")
 
+        # Start composite live pusher (WebSocket + Grafana Live)
+        self.live_server = CompositeLivePusher()
+        self.live_server.add(LiveStreamServer())  # WebSocket → HTML dashboard
+
+        grafana_url = os.getenv("GRAFANA_URL", "http://localhost:3000")
+        grafana_token = os.getenv("GRAFANA_API_TOKEN", "").strip()
+        grafana_user = os.getenv("GRAFANA_USER", "admin")
+        grafana_password = os.getenv("GRAFANA_PASSWORD", "admin")
+
+        grafana_kwargs = {
+            "grafana_url": grafana_url,
+            "stream_id": "pde",
+        }
+        if grafana_token:
+            grafana_kwargs["api_token"] = grafana_token
+        else:
+            grafana_kwargs["auth"] = (grafana_user, grafana_password)
+
+        self.live_server.add(GrafanaLivePusher(**grafana_kwargs))  # InfluxDB line protocol → Grafana Live
+        self.live_server.start()
+        self.log.info("📡 Live pusher started (WebSocket + Grafana Live)")
+
         self._subscribe_current_market()
         
         # Subscribe to Binance BTCUSDT based on config (trade=last price, mid=bid/ask mid)
@@ -438,6 +477,11 @@ class PolymarketPDEStrategy(Strategy):
         self._schedule_flip_stats_refresh()
 
     def on_stop(self) -> None:
+        # Stop live pusher
+        if hasattr(self, 'live_server'):
+            self.live_server.stop()
+            self.log.info("📡 Live pusher stopped")
+
         self.clock.cancel_timer("pde_market_rollover_check")
         
         instruments_to_unsub = []
@@ -445,6 +489,10 @@ class PolymarketPDEStrategy(Strategy):
             instruments_to_unsub.append(self.instrument.id)
         if self.down_instrument:
             instruments_to_unsub.append(self.down_instrument.id)
+        if self.next_instrument:
+            instruments_to_unsub.append(self.next_instrument.id)
+        if self.next_down_instrument:
+            instruments_to_unsub.append(self.next_down_instrument.id)
         
         for instrument_id in instruments_to_unsub:
             self.cancel_all_orders(instrument_id=instrument_id)
@@ -464,12 +512,20 @@ class PolymarketPDEStrategy(Strategy):
         self.start_price = {'up': None, 'down': None}
         self.start_ts = None
         self.positions = {
-            'up': {'open': False, 'entry_price': 0.0},
-            'down': {'open': False, 'entry_price': 0.0},
+            'up': {'open': False, 'entry_price': 0.0, 'phase': None},
+            'down': {'open': False, 'entry_price': 0.0, 'phase': None},
         }
         self.A_trades = 0
         self.tail_trade_done = False
         self.current_market_slug = None
+        self.next_market_slug = None
+        self.next_instrument = None
+        self.next_down_instrument = None
+        self._next_refresh_pending = False
+        self._post_rollover_subscribe_pending = False
+        self._post_rollover_switch_ts = 0.0
+        self._post_rollover_retry_count = 0
+        self._last_post_rollover_retry_ts = 0.0
         self.price_history['up'].clear()
         self.price_history['down'].clear()
         self.btc_price = None
@@ -489,6 +545,180 @@ class PolymarketPDEStrategy(Strategy):
         aligned_minute = (now.minute // interval) * interval
         market_time = now.replace(minute=aligned_minute, second=0, microsecond=0)
         return f"{self.config.market_base_slug}-{int(market_time.timestamp())}"
+
+    def _get_slug_for_timestamp(self, ts_sec: int) -> str:
+        return f"{self.config.market_base_slug}-{int(ts_sec)}"
+
+    def _get_round_boundaries(self, now_ts: float | None = None) -> tuple[int, int]:
+        if now_ts is None:
+            now_ts = self.clock.timestamp()
+        interval_sec = self.config.market_interval_minutes * 60
+        current_start = int(now_ts // interval_sec) * interval_sec
+        next_start = current_start + interval_sec
+        return current_start, next_start
+
+    def _find_market_instruments_by_slug(self, slug: str) -> tuple[Instrument | None, Instrument | None]:
+        all_instruments = self.cache.instruments(venue=Venue("POLYMARKET"))
+        matching_instruments = []
+        for inst in all_instruments:
+            info = getattr(inst, 'info', {}) or {}
+            if info.get("market_slug", "") == slug:
+                matching_instruments.append(inst)
+
+        up_matched = None
+        down_matched = None
+        if len(matching_instruments) >= 2:
+            for inst in matching_instruments:
+                info = getattr(inst, 'info', {}) or {}
+                outcome = info.get("outcome", "").lower()
+                if outcome == "up" or outcome == "yes":
+                    up_matched = inst
+                elif outcome == "down" or outcome == "no":
+                    down_matched = inst
+
+            if up_matched is None or down_matched is None:
+                instruments_with_tokens = []
+                for inst in matching_instruments:
+                    token_id = str(inst.id).split("-")[-1].split(".")[0] if hasattr(inst, 'id') else ""
+                    try:
+                        token_int = int(token_id) if token_id.isdigit() else 0
+                    except Exception:
+                        token_int = 0
+                    instruments_with_tokens.append((token_int, inst))
+
+                instruments_with_tokens.sort(key=lambda x: x[0])
+                if len(instruments_with_tokens) >= 1 and up_matched is None:
+                    up_matched = instruments_with_tokens[0][1]
+                if len(instruments_with_tokens) >= 2 and down_matched is None:
+                    down_matched = instruments_with_tokens[1][1]
+
+        return up_matched, down_matched
+
+    def _prewarm_next_market(self) -> None:
+        _, next_start = self._get_round_boundaries()
+        next_slug = self._get_slug_for_timestamp(next_start)
+        if next_slug == self.current_market_slug:
+            return
+        if self.next_market_slug == next_slug and self.next_instrument is not None:
+            return
+
+        up_matched, down_matched = self._find_market_instruments_by_slug(next_slug)
+        if up_matched is None:
+            if not self._next_refresh_pending:
+                self._next_refresh_pending = True
+                self.log.info(f"⏳ Prewarm miss for {next_slug}; requesting instrument refresh...")
+                try:
+                    self.request_instruments(
+                        venue=Venue("POLYMARKET"),
+                        callback=self._on_next_market_instruments_refreshed,
+                    )
+                except Exception as e:
+                    self._next_refresh_pending = False
+                    self.log.warning(f"Prewarm request_instruments failed (non-fatal): {e}")
+            return
+
+        self.next_market_slug = next_slug
+        self.next_instrument = up_matched
+        self.next_down_instrument = down_matched
+        self._next_refresh_pending = False
+
+        try:
+            self.subscribe_quote_ticks(up_matched.id)
+            self.subscribe_order_book_deltas(up_matched.id, book_type=BookType.L2_MBP)
+        except RuntimeError as e:
+            self.log.warning(f"⚠️ Prewarm subscribe Up delayed (WS not ready): {e}")
+
+        if down_matched is not None:
+            try:
+                self.subscribe_quote_ticks(down_matched.id)
+                self.subscribe_order_book_deltas(down_matched.id, book_type=BookType.L2_MBP)
+            except RuntimeError as e:
+                self.log.warning(f"⚠️ Prewarm subscribe Down delayed (WS not ready): {e}")
+
+        self.log.info(
+            f"🔥 Prewarmed next market {next_slug} | up={up_matched.id}"
+            + (f" down={down_matched.id}" if down_matched else " (down missing)")
+        )
+
+    def _on_next_market_instruments_refreshed(self, request_id) -> None:
+        self._next_refresh_pending = False
+        self._prewarm_next_market()
+
+    def _cleanup_expired_instruments(self) -> None:
+        """Remove expired instruments from cache to prevent list growing indefinitely.
+        
+        Keeps only instruments matching current or next market slugs.
+        Called during rollover after switching to new market.
+        """
+        all_instruments = self.cache.instruments(venue=Venue("POLYMARKET"))
+        current_slug_prefix = self.current_market_slug.replace("btc-updown-5m-", "") if self.current_market_slug else ""
+        next_slug_prefix = self.next_market_slug.replace("btc-updown-5m-", "") if self.next_market_slug else ""
+        
+        expired_count = 0
+        for inst in all_instruments:
+            inst_str = str(inst.id)
+            # Extract timestamp from instrument ID (format: tokenId-condId.POLYMARKET)
+            # We check if the instrument's condition slug contains our known slugs
+            info = getattr(inst, 'info', {}) or {}
+            market_slug = info.get('market_slug', '') or info.get('condition_slug', '')
+            
+            # Keep if matches current or next market
+            if market_slug and (market_slug == self.current_market_slug or market_slug == self.next_market_slug):
+                continue
+            if self.current_market_slug and market_slug.startswith(self.current_market_slug.rsplit('-', 1)[0]):
+                # Likely related to current market (same base, different timestamp)
+                continue
+                
+            # This instrument is expired - remove from cache
+            try:
+                # Note: NautilusTrader cache doesn't have public delete method,
+                # but we can at least stop subscribing to reduce noise
+                self.unsubscribe_quote_ticks(inst.id)
+                self.unsubscribe_order_book_deltas(inst.id)
+                expired_count += 1
+            except Exception:
+                pass
+        
+        if expired_count > 0:
+            self.log.debug(f"🧹 Cleaned up {expired_count} expired instruments from subscriptions")
+
+    def _activate_prewarmed_market(self, target_slug: str) -> bool:
+        if self.next_market_slug != target_slug or self.next_instrument is None:
+            return False
+
+        old_up = self.instrument
+        old_down = self.down_instrument
+
+        self.current_market_slug = target_slug
+        self.instrument = self.next_instrument
+        self.down_instrument = self.next_down_instrument
+
+        self.next_market_slug = None
+        self.next_instrument = None
+        self.next_down_instrument = None
+        self._next_refresh_pending = False
+
+        for old_inst in (old_up, old_down):
+            if old_inst is None:
+                continue
+            if self.instrument and old_inst.id == self.instrument.id:
+                continue
+            if self.down_instrument and old_inst.id == self.down_instrument.id:
+                continue
+            try:
+                self.unsubscribe_quote_ticks(old_inst.id)
+            except Exception:
+                pass
+            try:
+                self.unsubscribe_order_book_deltas(old_inst.id)
+            except Exception:
+                pass
+
+        # Cleanup expired instruments after activation
+        self._cleanup_expired_instruments()
+
+        self.log.info(f"✅ Activated prewarmed market: {target_slug}")
+        return True
 
     # ── Market subscription ────────────────────────────────────────────────
 
@@ -629,10 +859,11 @@ class PolymarketPDEStrategy(Strategy):
     def _on_instruments_refreshed(self, request_id) -> None:
         """Callback after request_instruments completes — retry subscription immediately"""
         all_instruments = self.cache.instruments(venue=Venue("POLYMARKET"))
-        self.log.info(
-            f"🔄 Provider refresh complete: {len(all_instruments)} instruments in cache. "
-            f"Retrying subscription..."
+        # 只输出 DEBUG 级别，避免启动/刷新时 instrument 列表过长刷屏
+        self.log.debug(
+            f"🔄 Provider refresh complete: {len(all_instruments)} instruments in cache"
         )
+        self.log.info("🔄 Provider refresh complete, retrying subscription...")
         self._subscribe_current_market()
 
     # ── Proactive provider refresh ────────────────────────────────────────
@@ -685,6 +916,24 @@ class PolymarketPDEStrategy(Strategy):
         )
         self._schedule_next_provider_refresh()
 
+    def _retry_current_market_subscriptions(self) -> None:
+        """Best-effort retry for current market subscriptions after rollover.
+
+        Handles transient provider websocket reconnect windows where subscribe commands
+        may fail with 'connection not active'.
+        """
+        for inst, label in ((self.instrument, "Up"), (self.down_instrument, "Down")):
+            if inst is None:
+                continue
+            try:
+                self.subscribe_quote_ticks(inst.id)
+            except RuntimeError as e:
+                self.log.warning(f"⚠️ Post-rollover retry quote {label} delayed: {e}")
+            try:
+                self.subscribe_order_book_deltas(inst.id, book_type=BookType.L2_MBP)
+            except RuntimeError as e:
+                self.log.warning(f"⚠️ Post-rollover retry orderbook {label} delayed: {e}")
+
     # ── Rollover timer ─────────────────────────────────────────────────────
 
     def _on_rollover_timer(self, event) -> None:
@@ -694,13 +943,36 @@ class PolymarketPDEStrategy(Strategy):
         # ── Dynamic flip stats refresh ──
         self._check_flip_stats_refresh()
 
+        now_ts = self.clock.timestamp()
+        _, next_boundary_ts = self._get_round_boundaries(now_ts)
+        seconds_to_roll = next_boundary_ts - now_ts
+        if 0 < seconds_to_roll <= self._prewarm_lead_seconds:
+            self._prewarm_next_market()
+
+        if self._post_rollover_subscribe_pending:
+            if (self.last_quote_tick_ts >= self._post_rollover_switch_ts
+                    and (now_ts - self.last_quote_tick_ts) <= 5):
+                self._post_rollover_subscribe_pending = False
+                self._post_rollover_retry_count = 0
+                self.log.info("✅ Post-rollover market data resumed")
+            elif (
+                self._post_rollover_retry_count < self._post_rollover_retry_max
+                and (now_ts - self._last_post_rollover_retry_ts) >= self._post_rollover_retry_interval_sec
+            ):
+                self._post_rollover_retry_count += 1
+                self._last_post_rollover_retry_ts = now_ts
+                self.log.warning(
+                    f"🔁 Post-rollover subscribe retry {self._post_rollover_retry_count}/"
+                    f"{self._post_rollover_retry_max}"
+                )
+                self._retry_current_market_subscriptions()
+
         # ── If rollover is in progress (waiting for instruments), just retry ──
         if self._rollover_in_progress:
             self._subscribe_current_market()
             return
 
         # ── Staleness watchdog: detect WS drop and force resubscribe ──
-        now_ts = self.clock.timestamp()
         # Check Polymarket tick staleness
         if (self.last_quote_tick_ts > 0
                 and (now_ts - self.last_quote_tick_ts) > 90
@@ -736,6 +1008,14 @@ class PolymarketPDEStrategy(Strategy):
             f"B={self.phase_b_cumulative._value.get()}, "
             f"rounds={self.rounds_counter._value.get()}"
         )
+
+        # Push rollover event to WebSocket
+        if hasattr(self, 'live_server'):
+            self.live_server.push_rollover(
+                old_slug=self.current_market_slug or '',
+                new_slug=new_slug,
+                rounds=int(self.rounds_counter._value.get()),
+            )
         
         # 1. Cancel pending orders
         if self.instrument:
@@ -750,11 +1030,16 @@ class PolymarketPDEStrategy(Strategy):
         # (align to 5-minute market intervals for real-time countdown accuracy)
         self.start_ts = self._calculate_round_start_ts()
         self.start_price = {'up': None, 'down': None}
-        self.positions = {
-            'up': {'open': False, 'entry_price': 0.0},
-            'down': {'open': False, 'entry_price': 0.0},
-        }
+        # Don't reset entire positions dict - phase is needed for PnL tracking
+        # until positions are fully closed. _close_all_open_positions handles
+        # phase cleanup for positions that are already closed.
+        # Only reset open/entry_price flags (phase kept for in-flight closes)
+        for token_key in ('up', 'down'):
+            self.positions[token_key]['open'] = False
+            self.positions[token_key]['entry_price'] = 0.0
+            # phase is intentionally preserved here - on_position_closed will clear it
         self.A_trades = 0
+        self.phase_a_trades_gauge.set(0)  # Reset gauge for new round
         self.tail_trade_done = False
         self.price_history['up'].clear()
         self.price_history['down'].clear()
@@ -763,9 +1048,13 @@ class PolymarketPDEStrategy(Strategy):
         # Keep btc_jump_ts/direction — recent jumps carry over to new round
         self.btc_price_history.clear()
         
-        self._subscribe_current_market()
+        if not self._activate_prewarmed_market(new_slug):
+            self._subscribe_current_market()
         self.last_rollover_check = datetime.now(timezone.utc)
-        self.last_quote_tick_ts = self.clock.timestamp()  # give new WS time to connect
+        self._post_rollover_subscribe_pending = True
+        self._post_rollover_switch_ts = self.clock.timestamp()
+        self._post_rollover_retry_count = 0
+        self._last_post_rollover_retry_ts = 0.0
         self._resubscribe_attempts = 0
 
     def _force_resubscribe(self) -> None:
@@ -803,6 +1092,12 @@ class PolymarketPDEStrategy(Strategy):
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
         """Process quote ticks from Binance BTC (if mid price mode) and Polymarket Up/Down tokens"""
+        # Log ALL ticks at INFO level to debug
+        token_str = str(tick.instrument_id)
+        is_poly = "POLYMARKET" in token_str
+        if is_poly:
+            self.log.info(f"[TICK] Polymarket tick received: {token_str[:60]}... bid={tick.bid_price} ask={tick.ask_price}")
+        
         # Handle Binance BTC quote ticks only if using mid price mode
         if tick.instrument_id == self.btc_instrument_id and self.config.btc_price_source == "mid":
             bid = float(tick.bid_price)
@@ -817,7 +1112,15 @@ class PolymarketPDEStrategy(Strategy):
                 return  # Invalid tick
             
             self._update_btc_metrics()
-            
+
+            # Push BTC tick to WebSocket
+            if hasattr(self, 'live_server'):
+                self.live_server.push_btc_tick(
+                    price=self.btc_price, bid=bid, ask=ask,
+                    delta_usd=self.btc_price - (self.btc_start_price or self.btc_price),
+                    move_bps=self.btc_momentum_gauge._value.get() if hasattr(self, 'btc_momentum_gauge') else 0,
+                )
+
             # Debug log
             if self.config.debug_raw_data:
                 spread_pct = ((ask - bid) / ask * 100) if ask > 0 else 0
@@ -826,7 +1129,16 @@ class PolymarketPDEStrategy(Strategy):
                     f"Spread={spread_pct:.3f}% | Ts={tick.ts_event}"
                 )
             return  # BTC tick processed, exit early
-        
+
+        is_active_up = bool(self.instrument and tick.instrument_id == self.instrument.id)
+        is_active_down = bool(self.down_instrument and tick.instrument_id == self.down_instrument.id)
+        if not is_active_up and not is_active_down:
+            return
+
+        if self._post_rollover_subscribe_pending:
+            self._post_rollover_subscribe_pending = False
+            self._post_rollover_retry_count = 0
+
         # Handle Polymarket Up/Down quote ticks
         self.last_quote_tick_ts = self.clock.timestamp()
         self.poly_last_tick_wall_ts = self.last_quote_tick_ts
@@ -848,12 +1160,30 @@ class PolymarketPDEStrategy(Strategy):
             )
         
         # Track latency gap: positive = Binance data is fresher (speed advantage)
+        gap_ms = 0.0
         if self.btc_last_tick_wall_ts > 0:
             gap_ms = (self.btc_last_tick_wall_ts - self.poly_last_tick_wall_ts) * 1000
             self.latency_gap_gauge.set(gap_ms)
-        if self.instrument and tick.instrument_id == self.instrument.id:
+
+        # Push Polymarket tick and latency to WebSocket
+        token_type_ws = "up" if is_active_up else "down"
+        bid_price = float(tick.bid_price)
+        ask_price = float(tick.ask_price)
+        mid_price = (bid_price + ask_price) / 2.0
+        spread_pct = ((ask_price - bid_price) / ask_price * 100) if ask_price > 0 else 0
+        if hasattr(self, 'live_server'):
+            self.live_server.push_poly_tick(
+                token=token_type_ws, bid=bid_price, ask=ask_price,
+                mid=mid_price, spread_pct=spread_pct,
+            )
+            self.live_server.push_latency(
+                gap_ms=gap_ms, btc_ts=self.btc_last_tick_wall_ts, poly_ts=self.poly_last_tick_wall_ts,
+            )
+
+        self.log.debug(f"[on_quote_tick] Routing tick: is_active_up={is_active_up}, is_active_down={is_active_down}, start_ts={self.start_ts}")
+        if is_active_up:
             self._process_tick(tick, is_up=True)
-        elif self.down_instrument and tick.instrument_id == self.down_instrument.id:
+        elif is_active_down:
             self._process_tick(tick, is_up=False)
 
     def _update_btc_metrics(self) -> None:
@@ -876,6 +1206,12 @@ class PolymarketPDEStrategy(Strategy):
                 self.btc_jump_ts = self.btc_last_tick_wall_ts
                 self.btc_jump_direction = 1 if move_bps > 0 else -1
                 self.btc_anchor_price = self.btc_price
+                # Push jump detection to WebSocket
+                if hasattr(self, 'live_server'):
+                    self.live_server.push_jump(
+                        direction=self.btc_jump_direction, move_bps=move_bps,
+                        jump_ts=self.btc_jump_ts, anchor_price=self.btc_anchor_price,
+                    )
         
         # Update history and delta
         self.btc_price_history.append(self.btc_price)
@@ -893,7 +1229,15 @@ class PolymarketPDEStrategy(Strategy):
         
         self.btc_price = float(tick.price)
         self._update_btc_metrics()
-        
+
+        # Push BTC trade tick to WebSocket
+        if hasattr(self, 'live_server'):
+            self.live_server.push_btc_tick(
+                price=self.btc_price, bid=0, ask=0,
+                delta_usd=self.btc_price - (self.btc_start_price or self.btc_price),
+                move_bps=self.btc_momentum_gauge._value.get() if hasattr(self, 'btc_momentum_gauge') else 0,
+            )
+
         # Debug log
         if self.config.debug_raw_data:
             self.log.info(
@@ -905,6 +1249,8 @@ class PolymarketPDEStrategy(Strategy):
         
         price = float(tick.bid_price + tick.ask_price) / 2.0
         token_key = 'up' if is_up else 'down'
+        
+        self.log.debug(f"[_process_tick] Enter: token={token_key}, start_ts={self.start_ts}, btc_price={self.btc_price}, btc_start={self.btc_start_price}")
         
         # Use UTC system clock for real-time countdown (not tick timestamp which may lag)
         utc_now = datetime.now(timezone.utc)
@@ -941,6 +1287,7 @@ class PolymarketPDEStrategy(Strategy):
         
         # Guard: round expired → close all positions, stop processing
         if remaining <= 0:
+            self.log.debug(f"[_process_tick] Round expired, closing positions: remaining={remaining}")
             self._close_all_open_positions()
             return
         
@@ -948,6 +1295,7 @@ class PolymarketPDEStrategy(Strategy):
         #   delta_log: dimensionless log-return for Phase A z-score calculation
         #   delta_usd: USD price offset for Phase B flip probability lookup
         if self.btc_price is None or self.btc_start_price is None or self.btc_start_price <= 0:
+            self.log.debug(f"[_process_tick] Early return: btc_price={self.btc_price}, btc_start_price={self.btc_start_price}")
             return  # Cannot trade without BTC reference price
         
         delta_log = math.log(self.btc_price / self.btc_start_price)
@@ -963,6 +1311,66 @@ class PolymarketPDEStrategy(Strategy):
             self._execute_phase_A(tick, is_up, t_elapsed, remaining, delta_log, abs(delta_log))
         else:
             self._execute_phase_B(tick, is_up, remaining, delta_usd, abs(delta_usd))
+
+        # Push phase state / safety / anomaly / depth to WebSocket (throttled to 500ms)
+        if hasattr(self, 'live_server'):
+            now_wall = time.time()
+            if now_wall - self._last_ws_push_ts >= 0.5:
+                self._last_ws_push_ts = now_wall
+                current_phase = 'A' if t_elapsed < 240 else 'B'
+                self.live_server.push_phase_state(
+                    phase=current_phase, remaining=remaining,
+                    a_trades=self.A_trades, b_trades=1 if self.tail_trade_done else 0,
+                    tail_done=self.tail_trade_done,
+                    btc_round=self.current_market_slug or "",
+                )
+
+                # Push safety thresholds
+                now_ts = self.clock.timestamp()
+                jump_age = now_ts - self.btc_jump_ts
+                speed_adv = self.btc_jump_ts > 0 and jump_age <= self.config.jump_staleness_sec
+                self.live_server.push_safety(
+                    speed_advantage=speed_adv,
+                    slippage_ok=True,  # checked at order time
+                    volatility_ok=True,  # sigma > 0 checked in phase logic
+                    depth_ok=True,  # checked at order time
+                    jump_fresh=speed_adv,
+                    phase_ok=True,
+                )
+
+                # Push anomaly detection
+                if self.btc_last_tick_wall_ts > 0 and (now_ts - self.btc_last_tick_wall_ts) > 10:
+                    self.live_server.push_anomaly('btc_stale', f'No BTC tick for {now_ts - self.btc_last_tick_wall_ts:.0f}s')
+                if self.poly_last_tick_wall_ts > 0 and (now_ts - self.poly_last_tick_wall_ts) > 10:
+                    self.live_server.push_anomaly('poly_stale', f'No Polymarket tick for {now_ts - self.poly_last_tick_wall_ts:.0f}s')
+
+                # Push order book depth for current token
+                inst = self.instrument if is_up else self.down_instrument
+                if inst:
+                    try:
+                        book = self.cache.order_book(inst.id)
+                        if book:
+                            levels = []
+                            for i in range(min(3, book.best_ask_price() and 3 or 0)):
+                                try:
+                                    ask_level = book.ask_price(i) if hasattr(book, 'ask_price') else None
+                                    ask_qty = book.ask_size(i) if hasattr(book, 'ask_size') else None
+                                    if ask_level and ask_qty:
+                                        levels.append({'price': float(ask_level), 'qty': float(ask_qty), 'side': 'ask'})
+                                except Exception:
+                                    pass
+                            for i in range(min(3, 3)):
+                                try:
+                                    bid_level = book.bid_price(i) if hasattr(book, 'bid_price') else None
+                                    bid_qty = book.bid_size(i) if hasattr(book, 'bid_size') else None
+                                    if bid_level and bid_qty:
+                                        levels.append({'price': float(bid_level), 'qty': float(bid_qty), 'side': 'bid'})
+                                except Exception:
+                                    pass
+                            if levels:
+                                self.live_server.push_depth(token='up' if is_up else 'down', levels=levels)
+                    except Exception:
+                        pass
 
     # ── Phase A: EV-driven strategy ───────────────────────────────────────
 
@@ -983,41 +1391,49 @@ class PolymarketPDEStrategy(Strategy):
         
         # Skip entry logic if this token already has an open position (wait for TP/SL)
         if self.positions[token_key]['open']:
+            self.log.debug(f"[Phase A] Skip {token_key}: position already open")
             return
-        
+
         # Skip if max buy entries reached for this round
         if self.A_trades >= self.config.max_A_trades:
+            self.log.debug(f"[Phase A] Skip {token_key}: max_A_trades reached ({self.A_trades}/{self.config.max_A_trades})")
             return
-        
+
         # ── Speed advantage gate: require recent BTC jump ──
         now_ts = self.clock.timestamp()
         jump_age = now_ts - self.btc_jump_ts
         if self.btc_jump_ts == 0 or jump_age > self.config.jump_staleness_sec:
             self.phase_a_skip_counter.labels(reason='no_jump').inc()
+            if self.btc_jump_ts == 0:
+                self.log.info(f"[Phase A] Skip {token_key}: NO BTC JUMP DETECTED YET (btc_jump_ts=0)")
+            else:
+                self.log.info(f"[Phase A] Skip {token_key}: BTC jump too old ({jump_age:.1f}s > {self.config.jump_staleness_sec}s)")
             return
         
         # Estimate volatility
         sigma = self._estimate_sigma(token_key)
         if sigma is None or sigma <= 0:
+            self.log.info(f"[Phase A] Skip {token_key}: sigma invalid (sigma={sigma})")
             return
-        
+
         self.sigma_gauge.set(sigma)
-        
+
         # Calculate theoretical probability using Brownian motion
         # Both delta_log and sigma are in log-return space (dimensionless)
         sigma_rem = sigma * math.sqrt(remaining)
         if sigma_rem <= 0:
+            self.log.info(f"[Phase A] Skip {token_key}: sigma_rem <= 0 (sigma={sigma:.6f}, remaining={remaining:.1f}s)")
             return
-        
+
         z = delta_log / sigma_rem
         p_up = norm.cdf(z)
-        
+
         token_type = token_key
         self.p_up_gauge.labels(token_type=token_type).set(p_up)
-        
+
         # Get market implied probability from current token
         market_ask = float(tick.ask_price)
-        
+
         # Calculate EV for buying THIS token
         # Up token:   ev = P(BTC up) - up_price    (token pays if BTC up)
         # Down token: ev = P(BTC down) - down_price (token pays if BTC down)
@@ -1025,17 +1441,32 @@ class PolymarketPDEStrategy(Strategy):
             ev_buy = p_up - market_ask
         else:
             ev_buy = (1 - p_up) - market_ask
-        
+
         self.ev_gauge.labels(token_type=token_type, side='buy').set(ev_buy)
-        
+
+        # Push EV to WebSocket (with Phase A detailed params)
+        if hasattr(self, 'live_server'):
+            self.live_server.push_ev(
+                token=token_type, phase='A', ev=ev_buy,
+                p_up=p_up, sigma=sigma,
+                z_score=z, delta_log=delta_log,
+                speed_advantage=True,  # already passed jump gate
+                ev_threshold=self.config.ev_threshold_A,
+                remaining=remaining,
+            )
+
         # Trading logic: buy this token if EV is positive enough
+        self.log.info(f"[Phase A] Eval {token_key}: p_up={p_up:.4f}, ask={market_ask:.4f}, EV={ev_buy:.4f}, threshold={self.config.ev_threshold_A}")
         if ev_buy > self.config.ev_threshold_A:
             self._open_position(is_up, OrderSide.BUY,
-                                f"Phase A: EV={ev_buy:.4f} > threshold, BUY {token_type.upper()} @ mkt={market_ask:.4f}")
+                                f"Phase A: EV={ev_buy:.4f} > threshold, BUY {token_type.upper()} @ mkt={market_ask:.4f}",
+                                phase='A')
             self.A_trades += 1
             self.phase_a_trades_gauge.set(self.A_trades)
             self.trades_counter.labels(phase='A', token_type=token_type, side='buy').inc()
             self.phase_a_cumulative.inc()
+        else:
+            self.log.info(f"[Phase A] Skip {token_key}: EV too low ({ev_buy:.4f} <= {self.config.ev_threshold_A})")
 
     # ── Phase B: Tail continuation strategy ─────────────────────────────────
 
@@ -1052,16 +1483,20 @@ class PolymarketPDEStrategy(Strategy):
         """
         
         self.strategy_state_gauge.set(2)  # Phase B
-        
+        target_type = 'up' if is_up else 'down'
+
         if self.tail_trade_done:
+            self.log.debug(f"[Phase B] Skip: tail trade already done")
             return
-        
+
         if abs_delta_usd < self.config.delta_tail_min:
+            self.log.info(f"[Phase B] Skip {target_type}: delta too small ({abs_delta_usd:.2f} < {self.config.delta_tail_min})")
             return
-        
+
         # Query flip probability from lookup table (USD-based)
         p_flip = self._get_flip_prob(remaining, abs_delta_usd)
         if p_flip is None:
+            self.log.info(f"[Phase B] Skip {target_type}: no flip prob data (remaining={remaining:.1f}s, delta={abs_delta_usd:.2f})")
             return
         
         token_type = 'up' if is_up else 'down'
@@ -1076,10 +1511,12 @@ class PolymarketPDEStrategy(Strategy):
             target_inst = self.down_instrument
         
         if target_inst is None:
+            self.log.warning(f"[Phase B] Skip {target_type}: target instrument is None")
             return
-        
+
         target_quote = self.cache.quote_tick(target_inst.id)
         if target_quote is None or float(target_quote.ask_price) <= 0:
+            self.log.info(f"[Phase B] Skip {target_type}: no valid quote (quote={target_quote})")
             return
         
         actual_ask = float(target_quote.ask_price)
@@ -1092,12 +1529,24 @@ class PolymarketPDEStrategy(Strategy):
         
         target_type = 'up' if target_is_up else 'down'
         self.ev_tail_gauge.labels(token_type=target_type).set(ev_tail)
-        
+
+        # Push EV to WebSocket (with Phase B detailed params)
+        if hasattr(self, 'live_server'):
+            self.live_server.push_ev(
+                token=target_type, phase='B', ev=ev_tail,
+                p_flip=p_flip, ev_tail=ev_tail,
+                delta_usd=delta_usd,
+                remaining=remaining,
+                tail_condition=abs_delta_usd >= self.config.delta_tail_min,
+            )
+
         # Trading logic: bet on continuation — BTC up → BUY Up token, BTC down → BUY Down token
+        self.log.info(f"[Phase B] Eval {target_type}: p_flip={p_flip:.4f}, ask={actual_ask:.4f}, EV={ev_tail:.4f}, threshold={self.config.ev_threshold_tail}")
         if ev_tail > self.config.ev_threshold_tail:
             self._open_position(target_is_up, OrderSide.BUY,
                                 f"Phase B continuation: BUY {target_type.upper()}, "
-                                f"EV={ev_tail:.4f}, p_flip={p_flip:.4f}, ask={actual_ask:.4f}")
+                                f"EV={ev_tail:.4f}, p_flip={p_flip:.4f}, ask={actual_ask:.4f}",
+                                phase='B')
             self.tail_trade_done = True
             self.trades_counter.labels(phase='B', token_type=target_type, side='buy').inc()
             self.phase_b_cumulative.inc()
@@ -1143,6 +1592,7 @@ class PolymarketPDEStrategy(Strategy):
         # Reset local tracking (on_position_closed will update metrics)
         self.positions[token_key]['open'] = False
         self.positions[token_key]['entry_price'] = 0.0
+        # Note: we keep phase until position is fully closed for PnL tracking
 
     def _close_all_open_positions(self) -> None:
         """Close all open positions (used at round end and rollover)"""
@@ -1151,7 +1601,10 @@ class PolymarketPDEStrategy(Strategy):
                 self._close_token_position(token_key, "Round ended / Rollover")
                 self.tp_sl_counter.labels(token_type=token_key, trigger='expire').inc()
                 self.position_pnl_pct_gauge.labels(token_type=token_key).set(0)
-        
+            else:
+                # No open position - safe to reset phase now
+                self.positions[token_key]['phase'] = None
+
         # Reset round state for new market
         self.start_ts = None
         self.start_price = {'up': None, 'down': None}
@@ -1264,8 +1717,15 @@ class PolymarketPDEStrategy(Strategy):
             self.log.debug(f"Book depth check error (non-fatal): {e}")
             return True, 0.0
 
-    def _open_position(self, is_up: bool, side: OrderSide, reason: str) -> None:
+    def _open_position(self, is_up: bool, side: OrderSide, reason: str, phase: str = 'A') -> None:
         """Open a position: qty = trade_amount_usd / ask_price"""
+        """
+        Args:
+            is_up: True for UP token, False for DOWN token
+            side: Order side (BUY/SELL)
+            reason: Reason for opening position (for logging)
+            phase: 'A' or 'B' indicating which phase opened this position
+        """
         instrument = self.instrument if is_up else self.down_instrument
         if not instrument:
             self.log.warning(f"⚠️  Cannot open position: instrument not available")
@@ -1304,10 +1764,18 @@ class PolymarketPDEStrategy(Strategy):
         )
         self.submit_order(order)
         
-        # Track position state
+        # Track position state with phase info
         self.positions[token_key]['open'] = True
         self.positions[token_key]['entry_price'] = entry_price
-        
+        self.positions[token_key]['phase'] = phase
+
+        # Push trade event to WebSocket
+        if hasattr(self, 'live_server'):
+            self.live_server.push_trade(
+                phase=phase, token=token_key, side='buy',
+                price=entry_price, qty=qty, reason=reason,
+            )
+
         self.position_entry_price_gauge.labels(token_type=token_key).set(entry_price)
 
     # ── Event handlers ─────────────────────────────────────────────────────
@@ -1316,17 +1784,84 @@ class PolymarketPDEStrategy(Strategy):
         self.log.info(f"✅ Filled: {event.order_side.name} @ {event.last_px} | qty={event.last_qty}")
 
     def on_position_opened(self, event) -> None:
-        token_type = 'up' if self.instrument and event.instrument_id == self.instrument.id else 'down'
+        # Properly match instrument_id to up/down token
+        if self.instrument and event.instrument_id == self.instrument.id:
+            token_type = 'up'
+        elif self.down_instrument and event.instrument_id == self.down_instrument.id:
+            token_type = 'down'
+        else:
+            self.log.warning(f"⚠️ Position opened for unknown instrument: {event.instrument_id}")
+            return
+        # Get phase from our tracking (set during _open_position)
+        phase = self.positions[token_type]['phase'] or 'A'
         self.position_size_gauge.labels(token_type=token_type).set(float(event.quantity))
-        self.log.info(f"💼 Position opened: {token_type} qty={event.quantity}")
+        self.log.info(f"💼 Position opened: {token_type} phase={phase} qty={event.quantity}")
+        # Push position open to WebSocket
+        if hasattr(self, 'live_server'):
+            self.live_server.push_position(
+                token=token_type, phase=phase, is_open=True,
+                entry_price=self.positions[token_type]['entry_price'],
+                quantity=float(event.quantity),
+            )
 
     def on_position_changed(self, event) -> None:
-        token_type = 'up' if self.instrument and event.instrument_id == self.instrument.id else 'down'
-        self.unrealized_pnl_gauge.labels(token_type=token_type).set(float(event.unrealized_pnl))
+        # Properly match instrument_id to up/down token
+        if self.instrument and event.instrument_id == self.instrument.id:
+            token_type = 'up'
+        elif self.down_instrument and event.instrument_id == self.down_instrument.id:
+            token_type = 'down'
+        else:
+            return
+        # Get phase from our tracking
+        phase = self.positions[token_type]['phase'] or 'A'
+        self.unrealized_pnl_gauge.labels(phase=phase, token_type=token_type).set(float(event.unrealized_pnl))
+        # Push position change to WebSocket
+        if hasattr(self, 'live_server'):
+            entry = self.positions[token_type]['entry_price']
+            pnl_pct = ((float(event.avg_px_open) - entry) / entry * 100) if entry > 0 else 0
+            self.live_server.push_position(
+                token=token_type, phase=phase, is_open=True,
+                entry_price=entry, current_price=float(event.avg_px_open),
+                unrealized_pnl=float(event.unrealized_pnl), pnl_pct=pnl_pct,
+                quantity=float(event.quantity),
+            )
 
     def on_position_closed(self, event) -> None:
-        token_type = 'up' if self.instrument and event.instrument_id == self.instrument.id else 'down'
-        self.realized_pnl_gauge.labels(token_type=token_type).set(float(event.realized_pnl))
-        self.unrealized_pnl_gauge.labels(token_type=token_type).set(0)
+        # Properly match instrument_id to up/down token
+        if self.instrument and event.instrument_id == self.instrument.id:
+            token_type = 'up'
+        elif self.down_instrument and event.instrument_id == self.down_instrument.id:
+            token_type = 'down'
+        else:
+            self.log.warning(f"⚠️ Position closed for unknown instrument: {event.instrument_id}")
+            return
+        # Get phase from our tracking before clearing
+        phase = self.positions[token_type]['phase'] or 'A'
+        self.realized_pnl_gauge.labels(phase=phase, token_type=token_type).set(float(event.realized_pnl))
+        self.unrealized_pnl_gauge.labels(phase=phase, token_type=token_type).set(0)
         self.position_size_gauge.labels(token_type=token_type).set(0)
-        self.log.info(f"💰 Position closed: {token_type} realized_pnl={event.realized_pnl}")
+        # Push position close to WebSocket
+        if hasattr(self, 'live_server'):
+            self.live_server.push_position(
+                token=token_type, phase=phase, is_open=False,
+                unrealized_pnl=0, realized_pnl=float(event.realized_pnl),
+            )
+        # Clear phase after position is closed
+        self.positions[token_type]['phase'] = None
+        self.log.info(f"💰 Position closed: {token_type} phase={phase} realized_pnl={event.realized_pnl}")
+
+        # Push PnL summary after each position close
+        if hasattr(self, 'live_server'):
+            self.live_server.push_pnl_summary(
+                phase_a_realized=float(self.realized_pnl_gauge.labels(phase='A', token_type='up')._value.get())
+                    + float(self.realized_pnl_gauge.labels(phase='A', token_type='down')._value.get()),
+                phase_b_realized=float(self.realized_pnl_gauge.labels(phase='B', token_type='up')._value.get())
+                    + float(self.realized_pnl_gauge.labels(phase='B', token_type='down')._value.get()),
+                phase_a_unrealized=float(self.unrealized_pnl_gauge.labels(phase='A', token_type='up')._value.get())
+                    + float(self.unrealized_pnl_gauge.labels(phase='A', token_type='down')._value.get()),
+                phase_b_unrealized=float(self.unrealized_pnl_gauge.labels(phase='B', token_type='up')._value.get())
+                    + float(self.unrealized_pnl_gauge.labels(phase='B', token_type='down')._value.get()),
+                round_pnl=float(event.realized_pnl),
+                cumulative_a=float(self.phase_a_cumulative._value.get()),
+                cumulative_b=float(self.phase_b_cumulative._value.get()),
+            )

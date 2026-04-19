@@ -36,6 +36,43 @@ class PDEDataMixin:
     _last_ws_push_ts: float
     _last_tick_log_ts: float = 0.0  # For throttling tick logs
 
+    def _persist_market_tick(
+        self,
+        source: str,
+        instrument_id: Any,
+        bid: float | None = None,
+        ask: float | None = None,
+        last: float | None = None,
+        mid: float | None = None,
+        volume: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if not getattr(self.config, 'persistence_enabled', False):
+            return
+        if not getattr(self.config, 'persistence_record_market_data', True):
+            return
+        store = getattr(self, 'persistence_store', None)
+        run_id = getattr(self, 'persistence_run_id', '')
+        if not store or not run_id:
+            return
+
+        try:
+            event_ts_ns = int(self.clock.timestamp() * 1_000_000_000)
+            store.insert_market_data(
+                run_id=run_id,
+                source=source,
+                instrument_id=str(instrument_id),
+                bid=bid,
+                ask=ask,
+                last=last,
+                mid=mid,
+                volume=volume,
+                event_ts_ns=event_ts_ns,
+                extra=extra,
+            )
+        except Exception as e:
+            self.log.debug(f"[PERSIST] market tick insert failed: {e}")
+
     def on_quote_tick(self, tick: QuoteTick) -> None:
         """Process quote ticks from Binance BTC and Polymarket tokens."""
         token_str = str(tick.instrument_id)
@@ -66,7 +103,7 @@ class PDEDataMixin:
         if self._post_rollover_subscribe_pending:
             self._post_rollover_subscribe_pending = False
             self._post_rollover_retry_count = 0
-            self.log.info("✅ First tick received after rollover, subscription confirmed")
+            self.log.info("[OK] First tick received after rollover, subscription confirmed")
         
         # Process Polymarket tick
         self._process_polymarket_tick(tick, is_active_up)
@@ -84,6 +121,14 @@ class PDEDataMixin:
             self.btc_price = bid
         else:
             return
+
+        self._persist_market_tick(
+            source='btc_quote',
+            instrument_id=tick.instrument_id,
+            bid=bid,
+            ask=ask,
+            mid=self.btc_price,
+        )
         
         self._update_btc_metrics_and_push(bid, ask)
     
@@ -93,6 +138,13 @@ class PDEDataMixin:
             return
         
         self.btc_price = float(tick.price)
+        self._persist_market_tick(
+            source='btc_trade',
+            instrument_id=tick.instrument_id,
+            last=float(tick.price),
+            volume=float(getattr(tick, 'size', 0.0) or 0.0),
+            mid=self.btc_price,
+        )
         self._update_btc_metrics_and_push(
             bid=float(tick.price) * 0.9995,
             ask=float(tick.price) * 1.0005
@@ -115,6 +167,15 @@ class PDEDataMixin:
 
         mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else (bid if bid > 0 else ask)
         spread_pct = ((ask - bid) / ask * 100) if ask > 0 else 0
+
+        self._persist_market_tick(
+            source='poly_quote',
+            instrument_id=tick.instrument_id,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            extra={'token_type': token_type, 'spread_pct': spread_pct},
+        )
         
         # Throttle WebSocket pushes to ~100ms
         now_ts = self.clock.timestamp()
@@ -180,7 +241,7 @@ class PDEDataMixin:
                         jump_ts=self.btc_jump_ts,
                         anchor_price=self.btc_anchor_price
                     )
-                    self.log.info(f"🚀 BTC Jump: {move_bps:.0f} bps")
+                    self.log.info(f"[START] BTC Jump: {move_bps:.0f} bps")
         
         # Push BTC tick
         if hasattr(self, 'live_server') and self.live_server:
@@ -200,18 +261,26 @@ class PDEDataMixin:
         # This is a hook for subclasses/mixins to implement
         pass
     
-    def _push_phase_state(self, phase: str, remaining: float) -> None:
+    def _push_phase_state(
+        self, phase: str, remaining: float,
+        phase_a_start: float = 0.0,
+        phase_a_end: float = 240.0,
+        elapsed: float = 0.0
+    ) -> None:
         """Push current phase state to dashboard."""
         if not hasattr(self, 'live_server') or self.live_server is None:
             return
-        
+
         self.live_server.push_phase_state(
             phase=phase,
             remaining=remaining,
             a_trades=getattr(self, 'A_trades', 0),
             b_trades=getattr(self, 'B_trades', 0),
             tail_done=getattr(self, 'tail_trade_done', False),
-            btc_round=self.current_market_slug or ""
+            btc_round=self.current_market_slug or "",
+            phase_a_start=phase_a_start,
+            phase_a_end=phase_a_end,
+            elapsed=elapsed
         )
     
     def _push_ev(self, token: str, phase: str, ev: float, **kwargs) -> None:
@@ -231,4 +300,4 @@ class PDEDataMixin:
             new_slug=new_slug,
             rounds=getattr(self, 'rounds_counter', None) and self.rounds_counter._value.get() or 0
         )
-        self.log.info(f"📡 Pushed rollover event: {old_slug} -> {new_slug}")
+        self.log.info(f"[SERVER] Pushed rollover event: {old_slug} -> {new_slug}")

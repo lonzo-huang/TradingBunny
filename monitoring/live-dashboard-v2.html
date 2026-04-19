@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDE Strategy — Pro Dashboard</title>
+<!-- TradingView Lightweight Charts -->
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<!-- ECharts -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0b0c10;color:#c5c8d4;font-family:'JetBrains Mono','Fira Code','Consolas',monospace;font-size:12px}
+.header{display:flex;justify-content:space-between;align-items:center;padding:8px 16px;background:#12131d;border-bottom:1px solid #2a2d3a;height:48px}
+.header h1{font-size:14px;font-weight:700;color:#e0e2f0}
+.header .status{display:flex;align-items:center;gap:12px;font-size:11px}
+.header .conn{display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%}.dot-on{background:#00e676;box-shadow:0 0 6px #00e676}.dot-off{background:#6b7394}
+.grid{display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(150px,auto);gap:6px;padding:6px;height:calc(100vh - 48px);overflow-y:auto}
+.zone{grid-column:1/-1;font-size:11px;font-weight:700;padding:4px 0 2px;color:#4a5080;border-bottom:1px solid #2a2d3a;margin-top:4px}
+.panel{background:#161822;border:1px solid #2a2d3a;border-radius:6px;overflow:hidden;position:relative;min-height:150px}
+.panel-header{position:absolute;top:0;left:0;right:0;height:22px;display:flex;align-items:center;justify-content:space-between;padding:0 6px;background:rgba(22,24,34,0.95);z-index:10;font-size:10px;color:#6b7394;border-bottom:1px solid #2a2d3a}
+.panel-title{font-weight:600;color:#9aa0be}
+.panel-value{font-size:10px;color:#c5c8d4}
+.chart-container{width:100%;height:100%;padding-top:22px}
+/* Panel sizes for 6-column layout */
+.p-1{grid-column:span 1}
+.p-2{grid-column:span 2}
+.p-3{grid-column:span 3}
+.p-4{grid-column:span 4}
+.p-tall{grid-row:span 2}
+/* Data grid styles */
+.data-row{display:flex;justify-content:space-between;align-items:center;padding:2px 6px;font-size:10px;border-bottom:1px solid #1e2030}
+.data-row .label{color:#6b7394;font-size:9px}
+.data-row .val{color:#c5c8d4;font-weight:600}
+.data-row .val.pos{color:#00e676}.data-row .val.neg{color:#ff5252}
+.params-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;padding:4px}
+.params-grid .param{text-align:center;padding:2px}
+.params-grid .param .label{display:block;font-size:8px;color:#6b7394}
+.params-grid .param .val{display:block;font-size:10px;font-weight:600;color:#c5c8d4}
+/* Depth table */
+.depth-tbl{width:100%;font-size:9px;border-collapse:collapse}
+.depth-tbl td,.depth-tbl th{padding:1px 4px;text-align:right}
+.depth-tbl th{color:#6b7394;font-weight:400}
+.depth-tbl .ask{color:#ff5252}.depth-tbl .bid{color:#00e676}
+/* Safety grid */
+.safety-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:4px}
+.safety-item{background:#1e2030;padding:4px 6px;border-radius:3px;display:flex;justify-content:space-between;align-items:center;font-size:9px}
+.safety-item .sl{color:#6b7394}.safety-item .sv{font-size:10px;font-weight:600}
+.safety-item .sv.ok{color:#00e676}.safety-item .sv.fail{color:#ff5252}
+/* Phase badge */
+.phase-badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:700}
+.phase-badge.a{background:#00e67620;color:#00e676;border:1px solid #00e676}
+.phase-badge.b{background:#448aff20;color:#448aff;border:1px solid #448aff}
+.phase-badge.idle{background:#6b739420;color:#6b7394;border:1px solid #6b7394}
+.tv-chart{width:100%;height:100%}
+/* Panel sizes */
+.p-wide{grid-column:span 2}
+.p-tall{grid-row:span 2}
+.p-large{grid-column:span 2;grid-row:span 2}
+/* Phase indicators */
+.phase-a{color:#00e676}.phase-b{color:#448aff}.phase-idle{color:#6b7394}
+.pnl-pos{color:#00e676}.pnl-neg{color:#ff5252}
+/* Event log overlay */
+.event-overlay{position:absolute;bottom:0;left:0;right:0;max-height:120px;background:rgba(11,12,16,0.95);border-top:1px solid #2a2d3a;padding:6px 8px;overflow-y:auto;font-size:10px;z-index:20}
+.event-entry{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid #1e2030}
+.event-time{color:#6b7394;min-width:60px}
+.event-type{text-transform:uppercase;font-weight:600;min-width:50px}
+.event-type.trade-buy{color:#00e676}
+.event-type.trade-sell{color:#ff5252}
+.event-type.jump{color:#ffc107}
+.event-type.phase{color:#448aff}
+.event-data{color:#c5c8d4}
+/* Controls */
+.controls{display:flex;gap:8px;align-items:center}
+.controls select,.controls button{background:#1a1d2a;color:#d6d9e8;border:1px solid #32364a;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer}
+.controls button:hover{background:#2a2d3a}
+.ctrl-panel{grid-column:1/-1;background:#151726;border:1px solid #2a2d3a;border-radius:6px;padding:8px}
+.ctrl-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.ctrl-row:last-child{margin-bottom:0}
+.ctrl-row input,.ctrl-row button{background:#1a1d2a;color:#d6d9e8;border:1px solid #32364a;border-radius:4px;padding:4px 8px;font-size:11px}
+.ctrl-row input{min-width:110px}
+.ctrl-row .wide{min-width:260px}
+.ctrl-label{font-size:10px;color:#8f95b2}
+.ctrl-status{font-size:10px;color:#9aa0be;white-space:pre-wrap;max-height:90px;overflow:auto;background:#10121b;border:1px solid #232638;border-radius:4px;padding:6px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>PDE Strategy Pro Dashboard</h1>
+  <div class="status">
+    <div class="conn"><span class="dot dot-off" id="connDot"></span><span id="connText">Disconnected</span></div>
+    <div class="controls">
+      <select id="timeRange"><option value="1m">1m</option><option value="5m">5m</option><option value="15m" selected>15m</option><option value="1h">1h</option><option value="6h">6h</option></select>
+      <button id="resetView">Reset</button>
+    </div>
+    <div id="roundBadge" style="font-size:11px;color:#9aa0be">Round: —</div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="ctrl-panel">
+    <div class="ctrl-row">
+      <span class="ctrl-label">Runtime Params</span>
+      <input id="paramEvThreshold" type="number" step="0.001" placeholder="ev_threshold_A">
+      <input id="paramPhaseBUsd" type="number" step="1" placeholder="phase_b_momentum_threshold_usd">
+      <input id="paramTp" type="number" step="0.01" placeholder="take_profit_pct">
+      <input id="paramSl" type="number" step="0.01" placeholder="stop_loss_pct">
+      <input id="paramPerTrade" type="number" step="1" placeholder="per_trade_usd">
+      <button id="btnApplyParams">Apply Params</button>
+      <button id="btnRefreshStatus">Refresh Status</button>
+    </div>
+    <div class="ctrl-row">
+      <span class="ctrl-label">Data & Replay</span>
+      <input id="exportDb" class="wide" value="data/pde/pde_runs.sqlite3" placeholder="db path">
+      <input id="exportOut" class="wide" value="data/pde/exports" placeholder="export output">
+      <button id="btnExport">Export</button>
+      <input id="replayCsv" class="wide" value="data/pde/exports/market_data.csv" placeholder="replay csv">
+      <input id="replaySpeed" type="number" step="1" value="20" placeholder="speed">
+      <button id="btnReplay">Replay</button>
+    </div>
+    <div class="ctrl-row">
+      <span class="ctrl-label">Backtest</span>
+      <input id="backtestCatalog" class="wide" placeholder="catalog path (required)">
+      <input id="backtestInstrument" value="BTCUSDT.BINANCE" placeholder="instrument id">
+      <input id="backtestStart" class="wide" placeholder="start (optional)">
+      <input id="backtestEnd" class="wide" placeholder="end (optional)">
+      <button id="btnBacktest">Backtest</button>
+    </div>
+    <div class="ctrl-status" id="controlStatus">Control status: idle</div>
+  </div>
+
+  <!-- ZONE 1: Price Charts -->
+  <div class="zone">① 实时价格区（TradingView 专业图表）</div>
+  
+  <!-- BTC Price -->
+  <div class="panel p-2" id="panel-btc">
+    <div class="panel-header">
+      <span class="panel-title">BTC Price</span>
+      <span class="panel-value" id="btcPrice">—</span>
+    </div>
+    <div class="chart-container" id="btcChart"></div>
+  </div>
+  
+  <!-- UP Price -->
+  <div class="panel p-1" id="panel-up">
+    <div class="panel-header">
+      <span class="panel-title">Polymarket Up</span>
+      <span class="panel-value" id="upPrice">—</span>
+    </div>
+    <div class="chart-container" id="upChart"></div>
+  </div>
+  
+  <!-- DOWN Price -->
+  <div class="panel p-1" id="panel-down">
+    <div class="panel-header">
+      <span class="panel-title">Polymarket Down</span>
+      <span class="panel-value" id="downPrice">—</span>
+    </div>
+    <div class="chart-container" id="downChart"></div>
+  </div>
+  
+  <!-- Comparison -->
+  <div class="panel p-2" id="panel-compare">
+    <div class="panel-header">
+      <span class="panel-title">BTC vs Polymarket</span>
+      <span class="panel-value" id="compareInfo">—</span>
+    </div>
+    <div class="chart-container" id="compareChart"></div>
+  </div>
+
+  <!-- ZONE 2: Phase & EV -->
+  <div class="zone">② 策略状态区（Phase A/B + EV曲线）</div>
+  
+  <!-- Phase Status -->
+  <div class="panel p-1" id="panel-phase">
+    <div class="panel-header">
+      <span class="panel-title">Phase</span>
+      <span class="panel-value" id="phaseBadge">IDLE</span>
+    </div>
+    <div class="data-row"><span class="label">Round</span><span class="val" id="phaseRound">—</span></div>
+    <div class="data-row"><span class="label">Remaining</span><span class="val" id="phaseRemaining">—</span></div>
+    <div class="data-row"><span class="label">A Window</span><span class="val" id="phaseAWindow">—</span></div>
+    <div class="data-row"><span class="label">A Trades</span><span class="val" id="phaseATrades">0</span></div>
+    <div class="data-row"><span class="label">B Trades</span><span class="val" id="phaseBTrades">0</span></div>
+    <div class="data-row"><span class="label">Tail Done</span><span class="val" id="phaseTailDone">No</span></div>
+  </div>
+  
+  <!-- Phase A Params -->
+  <div class="panel p-2" id="panel-phase-a">
+    <div class="panel-header">
+      <span class="panel-title">Phase A Params (EV Arbitrage)</span>
+      <span class="panel-value" id="evAValue">—</span>
+    </div>
+    <div class="params-grid">
+      <div class="param"><span class="label">p(t)</span><span class="val" id="pPInternal">—</span></div>
+      <div class="param"><span class="label">q(t)</span><span class="val" id="pPMarket">—</span></div>
+      <div class="param"><span class="label">EV</span><span class="val" id="pEvA">—</span></div>
+      <div class="param"><span class="label">EV Th</span><span class="val" id="pEvATh">—</span></div>
+      <div class="param"><span class="label">α</span><span class="val" id="pEvAlpha">—</span></div>
+      <div class="param"><span class="label">Window</span><span class="val" id="pPhaseAWindow">—</span></div>
+      <div class="param"><span class="label">Elapsed</span><span class="val" id="pElapsedA">—</span></div>
+      <div class="param"><span class="label">Rem</span><span class="val" id="pRemA">—</span></div>
+    </div>
+    <div class="chart-container" id="evAChart" style="padding-top:0;height:60px"></div>
+  </div>
+  
+  <!-- Phase B Params -->
+  <div class="panel p-2" id="panel-phase-b">
+    <div class="panel-header">
+      <span class="panel-title">Phase B Params (Trend Reinforcement)</span>
+      <span class="panel-value" id="evBValue">—</span>
+    </div>
+    <div class="params-grid">
+      <div class="param"><span class="label">ΔP</span><span class="val" id="pDeltaP">—</span></div>
+      <div class="param"><span class="label">ΔP%</span><span class="val" id="pDeltaPPct">—</span></div>
+      <div class="param"><span class="label">w(t)</span><span class="val" id="pTimeWeight">—</span></div>
+      <div class="param"><span class="label">Score</span><span class="val" id="pTrendScore">—</span></div>
+      <div class="param"><span class="label">Target</span><span class="val" id="pTarget">—</span></div>
+      <div class="param"><span class="label">Thresh</span><span class="val" id="pThresh">—</span></div>
+      <div class="param"><span class="label">Elapsed</span><span class="val" id="pElapsedB">—</span></div>
+      <div class="param"><span class="label">Rem</span><span class="val" id="pRemB">—</span></div>
+    </div>
+    <div class="chart-container" id="evBChart" style="padding-top:0;height:60px"></div>
+  </div>
+  
+  <!-- EV Curves Combined -->
+  <div class="panel p-2" id="panel-ev">
+    <div class="panel-header">
+      <span class="panel-title">EV Curves</span>
+      <span class="panel-value" id="evInfo">—</span>
+    </div>
+    <div class="chart-container" id="evChart"></div>
+  </div>
+
+  <!-- ZONE 3: Positions & PNL -->
+  <div class="zone">③ 交易执行区（持仓 + 盈亏）</div>
+  
+  <!-- Position UP -->
+  <div class="panel p-1" id="panel-pos-up">
+    <div class="panel-header">
+      <span class="panel-title">Position Polymarket Up</span>
+      <span class="panel-value" id="posUpStatus">Closed</span>
+    </div>
+    <div class="data-row"><span class="label">Phase</span><span class="val" id="posUpPhase">—</span></div>
+    <div class="data-row"><span class="label">Qty</span><span class="val" id="posUpQty">—</span></div>
+    <div class="data-row"><span class="label">Entry</span><span class="val" id="posUpEntry">—</span></div>
+    <div class="data-row"><span class="label">Current</span><span class="val" id="posUpCurrent">—</span></div>
+    <div class="data-row"><span class="label">PnL</span><span class="val pos" id="posUpPnl">0.00</span></div>
+    <div class="data-row"><span class="label">PnL%</span><span class="val pos" id="posUpPnlPct">0.0%</span></div>
+  </div>
+  
+  <!-- Position DOWN -->
+  <div class="panel p-1" id="panel-pos-down">
+    <div class="panel-header">
+      <span class="panel-title">Position Polymarket Down</span>
+      <span class="panel-value" id="posDownStatus">Closed</span>
+    </div>
+    <div class="data-row"><span class="label">Phase</span><span class="val" id="posDownPhase">—</span></div>
+    <div class="data-row"><span class="label">Qty</span><span class="val" id="posDownQty">—</span></div>
+    <div class="data-row"><span class="label">Entry</span><span class="val" id="posDownEntry">—</span></div>
+    <div class="data-row"><span class="label">Current</span><span class="val" id="posDownCurrent">—</span></div>
+    <div class="data-row"><span class="label">PnL</span><span class="val neg" id="posDownPnl">0.00</span></div>
+    <div class="data-row"><span class="label">PnL%</span><span class="val neg" id="posDownPnlPct">0.0%</span></div>
+  </div>
+  
+  <!-- Round PNL -->
+  <div class="panel p-1" id="panel-pnl-round">
+    <div class="panel-header">
+      <span class="panel-title">Round PNL</span>
+      <span class="panel-value" id="pnlRoundTotal">0.00</span>
+    </div>
+    <div class="data-row"><span class="label">A Realized</span><span class="val" id="pnlAR">0.00</span></div>
+    <div class="data-row"><span class="label">B Realized</span><span class="val" id="pnlBR">0.00</span></div>
+    <div class="data-row"><span class="label">A Unrealized</span><span class="val" id="pnlAU">0.00</span></div>
+    <div class="data-row"><span class="label">B Unrealized</span><span class="val" id="pnlBU">0.00</span></div>
+  </div>
+  
+  <!-- Cumulative PNL -->
+  <div class="panel p-1" id="panel-pnl-cum">
+    <div class="panel-header">
+      <span class="panel-title">Cumulative</span>
+      <span class="panel-value" id="pnlCumTotal">0</span>
+    </div>
+    <div class="data-row"><span class="label">A Cum</span><span class="val" id="pnlCumA">0</span></div>
+    <div class="data-row"><span class="label">B Cum</span><span class="val" id="pnlCumB">0</span></div>
+    <div class="chart-container" id="pnlChart" style="padding-top:0;height:80px"></div>
+  </div>
+
+  <!-- ZONE 4: System Health -->
+  <div class="zone">④ 系统健康区（深度 + 延迟 + 安全 + 事件）</div>
+  
+  <!-- Order Book Depth -->
+  <div class="panel p-2" id="panel-depth">
+    <div class="panel-header">
+      <span class="panel-title">Order Book Depth</span>
+      <span class="panel-value" id="depthInfo">—</span>
+    </div>
+    <div style="display:flex;height:100%">
+      <div style="flex:1;padding:4px"><div class="chart-container" id="depthChart" style="padding-top:0"></div></div>
+      <div style="width:120px;overflow:auto">
+        <table class="depth-tbl" id="depthTable">
+          <tr><th>Price</th><th>Qty</th></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Latency -->
+  <div class="panel p-1" id="panel-latency">
+    <div class="panel-header">
+      <span class="panel-title">Latency</span>
+      <span class="panel-value" id="latencyInfo">—</span>
+    </div>
+    <div class="data-row"><span class="label">BTC Gap</span><span class="val" id="latBtcGap">—</span></div>
+    <div class="data-row"><span class="label">Poly Gap</span><span class="val" id="latPolyGap">—</span></div>
+    <div class="chart-container" id="latencyChart" style="padding-top:0;height:100px"></div>
+  </div>
+  
+  <!-- Jump Detection -->
+  <div class="panel p-1" id="panel-jump">
+    <div class="panel-header">
+      <span class="panel-title">Jump Detection</span>
+      <span class="panel-value" id="jumpInfo">—</span>
+    </div>
+    <div class="data-row"><span class="label">Direction</span><span class="val" id="jumpDir">—</span></div>
+    <div class="data-row"><span class="label">BPS</span><span class="val" id="jumpBps">—</span></div>
+    <div class="data-row"><span class="label">Anchor</span><span class="val" id="jumpAnchor">—</span></div>
+  </div>
+  
+  <!-- Safety Checks -->
+  <div class="panel p-2" id="panel-safety">
+    <div class="panel-header">
+      <span class="panel-title">Safety Checks</span>
+      <span class="panel-value" id="safetyScore">100%</span>
+    </div>
+    <div class="safety-grid">
+      <div class="safety-item"><span class="sl">Speed</span><span class="sv ok" id="safeSpeed">OK</span></div>
+      <div class="safety-item"><span class="sl">Slippage</span><span class="sv ok" id="safeSlippage">OK</span></div>
+      <div class="safety-item"><span class="sl">Volatility</span><span class="sv ok" id="safeVol">OK</span></div>
+      <div class="safety-item"><span class="sl">Depth</span><span class="sv ok" id="safeDepth">OK</span></div>
+      <div class="safety-item"><span class="sl">Jump</span><span class="sv ok" id="safeJump">OK</span></div>
+      <div class="safety-item"><span class="sl">Phase</span><span class="sv ok" id="safePhase">OK</span></div>
+    </div>
+    <div class="chart-container" id="healthChart" style="padding-top:0;height:80px"></div>
+  </div>
+  
+  <!-- Events & Trades -->
+  <div class="panel p-2" id="panel-events">
+    <div class="panel-header">
+      <span class="panel-title">Events & Trades</span>
+      <span class="panel-value" id="eventCount">0</span>
+    </div>
+    <div class="chart-container"></div>
+    <div class="event-overlay" id="eventLog"></div>
+  </div>
+</div>
+
+<script>
+const WS_URL = `ws://${location.hostname||'localhost'}:8765`;
+const CONTROL_BASE = '/api/control';
+const RANGE_MS = { '1m': 60_000, '5m': 5*60_000, '15m': 15*60_000, '1h': 60*60_000, '6h': 6*60*60_000 };
+const MAX_HISTORY_MS = 6 * 60 * 60 * 1000; // Keep 6 hours of data
+const STORAGE_KEY = 'pde_dashboard_history';
+let currentRange = '15m';
+let ws;
+
+// TradingView chart instances
+const tvCharts = {};
+const tvSeries = {};
+
+// ECharts instances
+const ecCharts = {};
+
+// Data storage with localStorage persistence
+const dataStore = {
+  btc: [],
+  up: [],
+  down: [],
+  evA: [],
+  evB: [],
+  trades: [],
+  jumps: [],
+  depth: { up: [], down: [] },
+  pnl: { a: 0, b: 0, total: 0, history: [] },
+  health: { score: 100, items: {} }
+};
+
+// Load persisted data from localStorage
+function loadPersistedData() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return;
+    
+    // Check version to avoid loading corrupted old data
+    const parsed = JSON.parse(saved);
+    if (!parsed.version || parsed.version < 5) {
+      console.log('🗑️  Old/corrupted data format detected, clearing...');
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+    
+    const cutoff = Date.now() - MAX_HISTORY_MS;
+    
+    // Restore data points within time window, filtering null values
+    ['btc', 'up', 'down'].forEach(key => {
+      // Validate that data is an array
+      if (parsed[key] && Array.isArray(parsed[key])) {
+        dataStore[key] = parsed[key]
+          .map(p => ({
+            time: normalizeUnixSeconds(p.time ?? p.ts),
+            value: Number(p.value),
+          }))
+          .filter(p => p.time != null && Number.isFinite(p.value))
+          .filter(p => p.time * 1000 > cutoff);
+      } else {
+        dataStore[key] = []; // Reset if corrupted
+      }
+    });
+    console.log('📦 Loaded persisted data:', { btc: dataStore.btc.length, up: dataStore.up.length, down: dataStore.down.length });
+  } catch (e) {
+    console.warn('Failed to load persisted data:', e);
+    // Reset all on error
+    dataStore.btc = []; dataStore.up = []; dataStore.down = [];
+  }
+}
+
+// Save data to localStorage (throttled)
+let saveTimeout;
+function saveData() {
+  clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    try {
+      // Ensure all values are arrays before saving
+      const toSave = {
+        version: 5,  // Data format version
+        btc: Array.isArray(dataStore.btc) ? dataStore.btc.slice(-5000) : [],
+        up: Array.isArray(dataStore.up) ? dataStore.up.slice(-5000) : [],
+        down: Array.isArray(dataStore.down) ? dataStore.down.slice(-5000) : [],
+        savedAt: Date.now()
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+    } catch (e) {
+      console.warn('Failed to save data:', e);
+    }
+  }, 1000);
+}
+
+// Phase state
+let phaseState = { phase: 'IDLE', round: '—', remaining: 0 };
+
+function normalizeUnixSeconds(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n > 1e17) return Math.floor(n / 1e9); // ns -> s
+  if (n > 1e14) return Math.floor(n / 1e6); // us -> s
+  if (n > 1e11) return Math.floor(n / 1e3); // ms -> s
+  return Math.floor(n); // already seconds
+}
+
+// Initialize TradingView chart
+function initTVChart(containerId, options = {}) {
+  const container = document.getElementById(containerId);
+  const chart = LightweightCharts.createChart(container, {
+    layout: {
+      background: { color: 'transparent' },
+      textColor: '#6b7394',
+      fontSize: 10,
+    },
+    grid: {
+      vertLines: { color: '#1e2030' },
+      horzLines: { color: '#1e2030' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: {
+      borderColor: '#2a2d3a',
+      scaleMargins: { top: 0.1, bottom: 0.1 },
+    },
+    timeScale: {
+      borderColor: '#2a2d3a',
+      timeVisible: true,
+      secondsVisible: true,
+    },
+    handleScroll: { vertTouchDrag: false },
+    handleScale: { axisPressedMouseMove: { time: true, price: false } },
+  });
+
+  const series = chart.addAreaSeries({
+    lineColor: options.color || '#f7931a',
+    topColor: options.color ? options.color + '20' : '#f7931a20',
+    bottomColor: options.color ? options.color + '05' : '#f7931a05',
+    lineWidth: 2,
+    ...options.seriesOptions
+  });
+
+  // Handle resize
+  const resizeObserver = new ResizeObserver(() => {
+    chart.applyOptions({
+      width: container.clientWidth,
+      height: container.clientHeight,
+    });
+  });
+  resizeObserver.observe(container);
+
+  return { chart, series };
+}
+
+// Initialize ECharts
+function initEChart(containerId, option) {
+  const chart = echarts.init(document.getElementById(containerId), 'dark', {
+    renderer: 'canvas',
+    backgroundColor: 'transparent',
+  });
+  chart.setOption(option);
+  
+  window.addEventListener('resize', () => chart.resize());
+  return chart;
+}
+
+// Initialize all charts
+function initCharts() {
+  // Load persisted data first
+  loadPersistedData();
+  
+  // TradingView charts
+  const btc = initTVChart('btcChart', { color: '#f7931a' });
+  tvCharts.btc = btc.chart; tvSeries.btc = btc.series;
+  // Restore historical BTC data (filter nulls)
+  if (dataStore.btc.length > 0) {
+    const cleanBtc = dataStore.btc.filter(p => p.value != null && !isNaN(p.value)).map(p => ({ time: p.time, value: p.value }));
+    if (cleanBtc.length > 0) tvSeries.btc.setData(cleanBtc);
+  }
+
+  const up = initTVChart('upChart', { color: '#00e676' });
+  tvCharts.up = up.chart; tvSeries.up = up.series;
+  if (dataStore.up.length > 0) {
+    const cleanUp = dataStore.up.filter(p => p.value != null && !isNaN(p.value)).map(p => ({ time: p.time, value: p.value }));
+    if (cleanUp.length > 0) tvSeries.up.setData(cleanUp);
+  }
+
+  const down = initTVChart('downChart', { color: '#ff5252' });
+  tvCharts.down = down.chart; tvSeries.down = down.series;
+  if (dataStore.down.length > 0) {
+    const cleanDown = dataStore.down.filter(p => p.value != null && !isNaN(p.value)).map(p => ({ time: p.time, value: p.value }));
+    if (cleanDown.length > 0) tvSeries.down.setData(cleanDown);
+  }
+
+  // Comparison chart with two series
+  const compareContainer = document.getElementById('compareChart');
+  const compareChart = LightweightCharts.createChart(compareContainer, {
+    layout: { background: { color: 'transparent' }, textColor: '#6b7394', fontSize: 10 },
+    grid: { vertLines: { color: '#1e2030' }, horzLines: { color: '#1e2030' } },
+    rightPriceScale: { borderColor: '#2a2d3a' },
+    timeScale: { borderColor: '#2a2d3a', timeVisible: true, secondsVisible: false },
+    handleScroll: { vertTouchDrag: false },
+  });
+  tvCharts.compare = compareChart;
+  tvSeries.btcCompare = compareChart.addLineSeries({
+    color: '#f7931a', lineWidth: 2, priceScaleId: 'left'
+  });
+  tvSeries.upCompare = compareChart.addLineSeries({
+    color: '#00e676', lineWidth: 2, priceScaleId: 'right'
+  });
+  compareChart.priceScale('left').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+  compareChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+  new ResizeObserver(() => compareChart.applyOptions({
+    width: compareContainer.clientWidth, height: compareContainer.clientHeight
+  })).observe(compareContainer);
+
+  // EV chart
+  const evContainer = document.getElementById('evChart');
+  const evChart = LightweightCharts.createChart(evContainer, {
+    layout: { background: { color: 'transparent' }, textColor: '#6b7394', fontSize: 10 },
+    grid: { vertLines: { color: '#1e2030' }, horzLines: { color: '#1e2030' } },
+    rightPriceScale: { borderColor: '#2a2d3a' },
+    timeScale: { borderColor: '#2a2d3a', timeVisible: true, secondsVisible: false },
+  });
+  tvCharts.ev = evChart;
+  tvSeries.evAUp = evChart.addLineSeries({ color: '#00e676', lineWidth: 2 });
+  tvSeries.evADown = evChart.addLineSeries({ color: '#69f0ae', lineWidth: 2 });
+  tvSeries.evBUp = evChart.addLineSeries({ color: '#448aff', lineWidth: 2 });
+  tvSeries.evBDown = evChart.addLineSeries({ color: '#82b1ff', lineWidth: 2 });
+  new ResizeObserver(() => evChart.applyOptions({
+    width: evContainer.clientWidth, height: evContainer.clientHeight
+  })).observe(evContainer);
+
+  // Latency chart
+  const latContainer = document.getElementById('latencyChart');
+  const latChart = LightweightCharts.createChart(latContainer, {
+    layout: { background: { color: 'transparent' }, textColor: '#6b7394', fontSize: 10 },
+    grid: { vertLines: { color: '#1e2030' }, horzLines: { color: '#1e2030' } },
+    rightPriceScale: { borderColor: '#2a2d3a' },
+    timeScale: { borderColor: '#2a2d3a', timeVisible: true, secondsVisible: false },
+  });
+  tvCharts.latency = latChart;
+  tvSeries.latency = latChart.addLineSeries({ color: '#ab47bc', lineWidth: 2 });
+  new ResizeObserver(() => latChart.applyOptions({
+    width: latContainer.clientWidth, height: latContainer.clientHeight
+  })).observe(latContainer);
+
+  // ECharts - Depth
+  ecCharts.depth = initEChart('depthChart', {
+    grid: { left: 8, right: 8, top: 8, bottom: 8 },
+    xAxis: { type: 'value', show: false },
+    yAxis: { type: 'value', show: false },
+    series: [
+      { name: 'UP', type: 'bar', data: [], itemStyle: { color: '#00e676' } },
+      { name: 'DOWN', type: 'bar', data: [], itemStyle: { color: '#ff5252' } }
+    ]
+  });
+
+  // ECharts - PNL gauge
+  ecCharts.pnl = initEChart('pnlChart', {
+    grid: { left: 8, right: 8, top: 8, bottom: 20 },
+    xAxis: { type: 'category', data: ['A', 'B', 'Total'], axisLine: { lineStyle: { color: '#2a2d3a' } }, axisLabel: { color: '#6b7394', fontSize: 9 } },
+    yAxis: { type: 'value', show: false },
+    series: [{
+      type: 'bar',
+      data: [0, 0, 0],
+      itemStyle: {
+        color: (params) => {
+          const val = params.value;
+          return val >= 0 ? '#00e676' : '#ff5252';
+        }
+      },
+      label: { show: true, position: 'top', color: '#c5c8d4', fontSize: 10, formatter: (p) => p.value.toFixed(2) }
+    }]
+  });
+
+  // ECharts - Health score
+  ecCharts.health = initEChart('healthChart', {
+    series: [{
+      type: 'gauge',
+      startAngle: 180, endAngle: 0,
+      min: 0, max: 100,
+      splitNumber: 5,
+      itemStyle: { color: '#00e676' },
+      progress: { show: true, width: 8 },
+      pointer: { show: false },
+      axisLine: { lineStyle: { width: 8, color: [[1, '#1e2030']] } },
+      axisTick: { show: false },
+      splitLine: { show: false },
+      axisLabel: { show: false },
+      detail: { valueAnimation: true, fontSize: 16, color: '#c5c8d4', offsetCenter: [0, '-20%'], formatter: '{value}' },
+      data: [{ value: 100, name: 'Health', nameTextStyle: { color: '#6b7394', fontSize: 10 } }]
+    }]
+  });
+}
+
+// Data point handling with persistence
+function addDataPoint(series, data, key = null) {
+  if (!series) return;
+  // Validate data has required fields
+  if (!data || data.time == null || isNaN(data.time) || data.value == null || isNaN(data.value)) {
+    return;
+  }
+  const time = normalizeUnixSeconds(data.time);
+  if (time == null) return;
+  const value = parseFloat(data.value);
+  if (isNaN(value)) {
+    console.warn('Invalid value:', data.value);
+    return;
+  }
+  try {
+    series.update({ time, value });
+  } catch (e) {
+    console.error('Chart update error:', e);
+    return;
+  }
+  // Persist to dataStore if key provided
+  if (key && dataStore[key]) {
+    dataStore[key].push({ time, value });
+    // Keep only last 6 hours
+    const cutoff = Date.now() / 1000 - MAX_HISTORY_MS / 1000;
+    if (dataStore[key].length > 100 && dataStore[key][0].time < cutoff) {
+      dataStore[key] = dataStore[key].filter(p => p.time > cutoff);
+    }
+    saveData();
+  }
+}
+
+// Time range filtering for TV charts
+function applyTimeRange() {
+  const now = Date.now() / 1000;
+  const from = now - RANGE_MS[currentRange] / 1000;
+  
+  Object.values(tvCharts).forEach(chart => {
+    if (chart && chart.timeScale) {
+      chart.timeScale().setVisibleRange({ from: from, to: now });
+    }
+  });
+}
+
+// Event log
+function addEvent(type, data) {
+  const log = document.getElementById('eventLog');
+  const time = new Date().toLocaleTimeString();
+  const entry = document.createElement('div');
+  entry.className = 'event-entry';
+  
+  let typeClass = '';
+  let content = '';
+  
+  switch(type) {
+    case 'trade':
+      typeClass = data.side === 'buy' ? 'trade-buy' : 'trade-sell';
+      content = `${data.side.toUpperCase()} ${data.token} @ ${data.price.toFixed(4)}`;
+      break;
+    case 'jump':
+      typeClass = 'jump';
+      content = `Jump ${data.direction} ${data.bps.toFixed(1)} bps`;
+      break;
+    case 'phase':
+      typeClass = 'phase';
+      content = `Phase ${data.phase} - Round: ${data.round}`;
+      break;
+    default:
+      content = JSON.stringify(data);
+  }
+  
+  entry.innerHTML = `<span class="event-time">${time}</span><span class="event-type ${typeClass}">${type}</span><span class="event-data">${content}</span>`;
+  log.insertBefore(entry, log.firstChild);
+  
+  // Keep only last 50 events
+  while (log.children.length > 50) {
+    log.removeChild(log.lastChild);
+  }
+  
+  document.getElementById('eventCount').textContent = log.children.length;
+}
+
+// WebSocket handlers - populate all panels
+const handlers = {
+  connected: (m) => {
+    console.log('✅ WS connected to server');
+  },
+  btc_tick: (m) => {
+    if (m.price == null || isNaN(m.price) || m.ts == null || isNaN(m.ts)) return;
+    document.getElementById('btcPrice').textContent = m.price.toFixed(2);
+    addDataPoint(tvSeries.btc, { time: m.ts * 1000, value: m.price }, 'btc');
+    addDataPoint(tvSeries.btcCompare, { time: m.ts * 1000, value: m.price }, 'btc');
+  },
+  
+  poly_tick: (m) => {
+    if (!m || !m.token || m.ts == null || isNaN(m.ts)) return;
+    const priceEl = m.token === 'up' ? 'upPrice' : 'downPrice';
+    const mid = m.mid || ((m.bid + m.ask) / 2) || 0;
+    if (mid == null || isNaN(mid) || mid <= 0) return;
+    document.getElementById(priceEl).textContent = mid.toFixed(4);
+    const key = m.token === 'up' ? 'up' : 'down';
+    if (m.token === 'up') {
+      addDataPoint(tvSeries.up, { time: m.ts * 1000, value: mid }, key);
+      addDataPoint(tvSeries.upCompare, { time: m.ts * 1000, value: mid }, key);
+    } else {
+      addDataPoint(tvSeries.down, { time: m.ts * 1000, value: mid }, key);
+    }
+    if (m.ask && m.bid && mid > 0) {
+      document.getElementById('depthInfo').textContent = `S:${((m.ask-m.bid)/mid*100).toFixed(2)}%`;
+    }
+  },
+  
+  phase_state: (m) => {
+    const remaining = Math.max(0, Number(m.remaining) || 0);
+    phaseState = { phase: m.phase, round: m.btc_round || '—', remaining };
+    // Update header
+    document.getElementById('roundBadge').textContent = `Round: ${phaseState.round}`;
+    document.getElementById('compareInfo').textContent = `Phase ${m.phase} | ${Math.round(remaining)}s`;
+    // Update Phase panel
+    const badge = document.getElementById('phaseBadge');
+    badge.textContent = m.phase;
+    badge.className = 'panel-value phase-badge ' + (m.phase==='A'?'a':m.phase==='B'?'b':'idle');
+    document.getElementById('phaseRound').textContent = m.btc_round || '—';
+    document.getElementById('phaseRemaining').textContent = Math.round(remaining) + 's';
+    document.getElementById('phaseATrades').textContent = m.a_trades || 0;
+    document.getElementById('phaseBTrades').textContent = m.b_trades || 0;
+    document.getElementById('phaseTailDone').textContent = m.tail_done ? 'Yes' : 'No';
+    // Show Phase A window config if available
+    if (m.phase_a_start != null && m.phase_a_end != null) {
+      const winEl = document.getElementById('phaseAWindow');
+      if (winEl) winEl.textContent = `${m.phase_a_start}s-${m.phase_a_end}s`;
+    }
+  },
+  
+  ev: (m) => {
+    if (m.ts == null || isNaN(m.ts)) return;
+    const evVal = m.ev || 0;
+    const isA = m.phase === 'A';
+    const isUp = m.token === 'up';
+    const remaining = Math.max(0, Number(m.remaining) || 0);
+    const series = isA
+      ? (isUp ? tvSeries.evAUp : tvSeries.evADown)
+      : (isUp ? tvSeries.evBUp : tvSeries.evBDown);
+    addDataPoint(series, { time: m.ts * 1000, value: evVal });
+    document.getElementById('evInfo').textContent = `Phase ${m.phase} ${isUp ? 'UP' : 'DOWN'} EV:${evVal.toFixed(4)}`;
+    
+    // Update Phase A params (EV Arbitrage)
+    if (isA) {
+      document.getElementById('evAValue').textContent = evVal.toFixed(4);
+      document.getElementById('pPInternal').textContent = m.p_t ? (m.p_t*100).toFixed(1)+'%' : '—';
+      document.getElementById('pPMarket').textContent = m.q_t ? (m.q_t*100).toFixed(1)+'%' : '—';
+      document.getElementById('pEvA').textContent = evVal.toFixed(4);
+      document.getElementById('pEvATh').textContent = m.ev_threshold?.toFixed(4) || '—';
+      document.getElementById('pEvAlpha').textContent = m.ev_alpha?.toFixed(4) || '—';
+      // Window display: phase_a_start - phase_a_end
+      const winStart = Number(m.phase_a_start || 0);
+      const winEnd = Number(m.phase_a_end || 240);
+      document.getElementById('pPhaseAWindow').textContent = winStart + '-' + winEnd + 's';
+      document.getElementById('pElapsedA').textContent = (m.elapsed || 0).toFixed(0) + 's';
+      document.getElementById('pRemA').textContent = remaining.toFixed(0) + 's';
+    } else {
+      // Update Phase B params (Trend Reinforcement)
+      const deltaP = Number.isFinite(Number(m.delta_p)) ? Number(m.delta_p) : 0;
+      const deltaPPct = Number.isFinite(Number(m.delta_p_pct)) ? Number(m.delta_p_pct) : 0;
+      const timeWeight = Number.isFinite(Number(m.time_weight)) ? Number(m.time_weight) : 0;
+      const trendScore = Number.isFinite(Number(m.trend_score)) ? Number(m.trend_score) : 0;
+      document.getElementById('evBValue').textContent = evVal.toFixed(4);
+      document.getElementById('pDeltaP').textContent = deltaP.toFixed(2);
+      document.getElementById('pDeltaPPct').textContent = (deltaPPct*100).toFixed(2)+'%';
+      document.getElementById('pTimeWeight').textContent = timeWeight.toFixed(3);
+      document.getElementById('pTrendScore').textContent = trendScore.toFixed(6);
+      document.getElementById('pTarget').textContent = m.target || '—';
+      document.getElementById('pThresh').textContent = m.momentum_threshold ? ('$'+m.momentum_threshold) : '—';
+      document.getElementById('pElapsedB').textContent = (m.elapsed || 0).toFixed(0) + 's';
+      document.getElementById('pRemB').textContent = remaining.toFixed(0) + 's';
+    }
+  },
+  
+  position: (m) => {
+    const isUp = m.token === 'up';
+    const prefix = isUp ? 'posUp' : 'posDown';
+    document.getElementById(prefix + 'Status').textContent = m.is_open ? 'Open' : 'Closed';
+    document.getElementById(prefix + 'Phase').textContent = m.phase || '—';
+    document.getElementById(prefix + 'Qty').textContent = m.quantity?.toFixed(2) || '—';
+    document.getElementById(prefix + 'Entry').textContent = m.entry_price?.toFixed(4) || '—';
+    document.getElementById(prefix + 'Current').textContent = m.current_price?.toFixed(4) || '—';
+    const pnlEl = document.getElementById(prefix + 'Pnl');
+    pnlEl.textContent = (m.unrealized_pnl || 0).toFixed(2);
+    pnlEl.className = 'val ' + ((m.unrealized_pnl || 0) >= 0 ? 'pos' : 'neg');
+    const pctEl = document.getElementById(prefix + 'PnlPct');
+    pctEl.textContent = (m.pnl_pct || 0).toFixed(1) + '%';
+    pctEl.className = 'val ' + ((m.pnl_pct || 0) >= 0 ? 'pos' : 'neg');
+  },
+  
+  trade: (m) => {
+    addEvent('trade', m);
+  },
+  
+  pnl_summary: (m) => {
+    const total = (m.cumulative_a || 0) + (m.cumulative_b || 0);
+    // Round PNL
+    document.getElementById('pnlRoundTotal').textContent = (m.round_pnl || 0).toFixed(2);
+    document.getElementById('pnlAR').textContent = (m.phase_a_realized || 0).toFixed(2);
+    document.getElementById('pnlBR').textContent = (m.phase_b_realized || 0).toFixed(2);
+    document.getElementById('pnlAU').textContent = (m.phase_a_unrealized || 0).toFixed(2);
+    document.getElementById('pnlBU').textContent = (m.phase_b_unrealized || 0).toFixed(2);
+    // Cumulative
+    document.getElementById('pnlCumTotal').textContent = total.toFixed(2);
+    document.getElementById('pnlCumA').textContent = (m.cumulative_a || 0).toFixed(2);
+    document.getElementById('pnlCumB').textContent = (m.cumulative_b || 0).toFixed(2);
+    // Chart
+    ecCharts.pnl.setOption({ series: [{ data: [m.cumulative_a || 0, m.cumulative_b || 0, total] }] });
+  },
+  
+  jump: (m) => {
+    document.getElementById('jumpDir').textContent = m.direction > 0 ? 'UP' : 'DOWN';
+    document.getElementById('jumpBps').textContent = m.move_bps?.toFixed(1) || '—';
+    document.getElementById('jumpAnchor').textContent = m.anchor_price?.toFixed(2) || '—';
+    document.getElementById('jumpInfo').textContent = `${m.direction > 0 ? 'UP' : 'DOWN'} ${m.move_bps?.toFixed(1)}bps`;
+    addEvent('jump', { direction: m.direction > 0 ? 'UP' : 'DOWN', bps: m.move_bps });
+  },
+  
+  latency: (m) => {
+    if (m.ts == null || isNaN(m.ts)) return;
+    document.getElementById('latencyInfo').textContent = m.gap_ms?.toFixed(0) + 'ms' || '—';
+    document.getElementById('latBtcGap').textContent = m.btc_ts ? ((Date.now()/1000 - m.btc_ts)*1000).toFixed(0) + 'ms' : '—';
+    document.getElementById('latPolyGap').textContent = m.poly_ts ? ((Date.now()/1000 - m.poly_ts)*1000).toFixed(0) + 'ms' : '—';
+    addDataPoint(tvSeries.latency, { time: m.ts * 1000, value: m.gap_ms || 0 });
+  },
+  
+  depth: (m) => {
+    if (!m || !m.levels || !Array.isArray(m.levels)) return;
+    const bids = m.levels.filter(l => l.side === 'bid').slice(0, 5);
+    const asks = m.levels.filter(l => l.side === 'ask').slice(0, 5);
+    const bidData = bids.map((l, i) => [i, l.qty]);
+    const askData = asks.map((l, i) => [i, l.qty]);
+    ecCharts.depth.setOption({ 
+      series: [
+        { name: 'Bids', data: bidData, itemStyle: { color: '#00e676' } },
+        { name: 'Asks', data: askData, itemStyle: { color: '#ff5252' } }
+      ] 
+    });
+    // Update depth table
+    const tbl = document.getElementById('depthTable');
+    tbl.innerHTML = '<tr><th>Price</th><th>Qty</th></tr>';
+    asks.reverse().forEach(l => {
+      tbl.innerHTML += `<tr><td class="ask">${l.price.toFixed(4)}</td><td class="ask">${l.qty.toFixed(2)}</td></tr>`;
+    });
+    bids.forEach(l => {
+      tbl.innerHTML += `<tr><td class="bid">${l.price.toFixed(4)}</td><td class="bid">${l.qty.toFixed(2)}</td></tr>`;
+    });
+  },
+  
+  safety: (m) => {
+    const checks = {
+      Speed: m.speed_advantage,
+      Slippage: m.slippage_ok,
+      Volatility: m.volatility_ok,
+      Depth: m.depth_ok,
+      Jump: m.jump_fresh,
+      Phase: m.phase_ok
+    };
+    const score = Math.round((Object.values(checks).filter(Boolean).length / 6) * 100);
+    document.getElementById('safetyScore').textContent = score + '%';
+    // Update each safety item
+    Object.entries(checks).forEach(([name, ok]) => {
+      const el = document.getElementById('safe' + name);
+      if (el) {
+        el.textContent = ok ? 'OK' : 'FAIL';
+        el.className = 'sv ' + (ok ? 'ok' : 'fail');
+      }
+    });
+    ecCharts.health.setOption({ 
+      series: [{ 
+        data: [{ value: score, name: 'Health' }], 
+        itemStyle: { color: score > 80 ? '#00e676' : score > 50 ? '#ffc107' : '#ff5252' }
+      }] 
+    });
+  },
+  
+  rollover: (m) => {
+    phaseState.round = m.new_slug || '—';
+    document.getElementById('roundBadge').textContent = `Round: ${phaseState.round}`;
+    addEvent('phase', { phase: 'ROLLOVER', round: phaseState.round });
+    // Clear chart data
+    Object.values(tvSeries).forEach(s => { if (s && s.setData) s.setData([]); });
+    // Clear persisted data for new round
+    dataStore.btc = []; dataStore.up = []; dataStore.down = [];
+    localStorage.removeItem(STORAGE_KEY);
+    console.log('🔄 Rollover: Cleared chart data and localStorage for new round');
+  },
+  
+  anomaly: (m) => {
+    addEvent('anomaly', { type: m.anomaly_type, detail: m.detail });
+  }
+};
+
+// WebSocket connection
+function connect() {
+  ws = new WebSocket(WS_URL);
+  
+  ws.onopen = () => {
+    document.getElementById('connDot').className = 'dot dot-on';
+    document.getElementById('connText').textContent = 'Connected';
+  };
+  
+  ws.onclose = () => {
+    document.getElementById('connDot').className = 'dot dot-off';
+    document.getElementById('connText').textContent = 'Disconnected';
+    setTimeout(connect, 3000);
+  };
+  
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      const handler = handlers[msg.type];
+      if (handler) {
+        handler(msg.data || msg);
+      } else if (msg.type) {
+        console.warn('No handler for message type:', msg.type);
+      }
+    } catch (err) {
+      console.error('WS parse error:', err, 'data:', e.data?.substring?.(0, 200));
+    }
+  };
+}
+
+// Controls
+document.getElementById('timeRange').addEventListener('change', (e) => {
+  currentRange = e.target.value;
+  applyTimeRange();
+});
+
+document.getElementById('resetView').addEventListener('click', () => {
+  Object.values(tvCharts).forEach(chart => {
+    if (chart && chart.timeScale) {
+      chart.timeScale().fitContent();
+    }
+  });
+});
+
+async function postControl(path, payload) {
+  const res = await fetch(`${CONTROL_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+  return await res.json();
+}
+
+async function loadControlStatus() {
+  try {
+    const res = await fetch(`${CONTROL_BASE}/status`);
+    const data = await res.json();
+    const status = data.status || {};
+    const lines = [];
+    ['export', 'replay', 'backtest'].forEach((k) => {
+      const s = status[k] || {};
+      lines.push(`${k}: ${s.status || 'idle'} (code=${s.last_exit_code ?? '—'})`);
+      if (s.last_output) {
+        lines.push(`  ${String(s.last_output).split('\n').slice(-2).join(' | ')}`);
+      }
+    });
+    document.getElementById('controlStatus').textContent = lines.join('\n');
+
+    const p = data.runtime_params || {};
+    if (p.ev_threshold_A != null) document.getElementById('paramEvThreshold').value = p.ev_threshold_A;
+    if (p.phase_b_momentum_threshold_usd != null) document.getElementById('paramPhaseBUsd').value = p.phase_b_momentum_threshold_usd;
+    if (p.take_profit_pct != null) document.getElementById('paramTp').value = p.take_profit_pct;
+    if (p.stop_loss_pct != null) document.getElementById('paramSl').value = p.stop_loss_pct;
+    if (p.per_trade_usd != null) document.getElementById('paramPerTrade').value = p.per_trade_usd;
+  } catch (e) {
+    document.getElementById('controlStatus').textContent = `Control status load failed: ${e}`;
+  }
+}
+
+document.getElementById('btnRefreshStatus').addEventListener('click', loadControlStatus);
+
+document.getElementById('btnApplyParams').addEventListener('click', async () => {
+  const params = {};
+  const putNum = (id, key) => {
+    const v = document.getElementById(id).value;
+    if (v !== '') params[key] = Number(v);
+  };
+  putNum('paramEvThreshold', 'ev_threshold_A');
+  putNum('paramPhaseBUsd', 'phase_b_momentum_threshold_usd');
+  putNum('paramTp', 'take_profit_pct');
+  putNum('paramSl', 'stop_loss_pct');
+  putNum('paramPerTrade', 'per_trade_usd');
+  const out = await postControl('/params', { params });
+  document.getElementById('controlStatus').textContent = JSON.stringify(out, null, 2);
+  loadControlStatus();
+});
+
+document.getElementById('btnExport').addEventListener('click', async () => {
+  const out = await postControl('/export', {
+    db: document.getElementById('exportDb').value,
+    out: document.getElementById('exportOut').value,
+  });
+  document.getElementById('controlStatus').textContent = JSON.stringify(out, null, 2);
+  setTimeout(loadControlStatus, 1500);
+});
+
+document.getElementById('btnReplay').addEventListener('click', async () => {
+  const out = await postControl('/replay', {
+    csv: document.getElementById('replayCsv').value,
+    speed: Number(document.getElementById('replaySpeed').value || 20),
+  });
+  document.getElementById('controlStatus').textContent = JSON.stringify(out, null, 2);
+  setTimeout(loadControlStatus, 1500);
+});
+
+document.getElementById('btnBacktest').addEventListener('click', async () => {
+  const out = await postControl('/backtest', {
+    catalog: document.getElementById('backtestCatalog').value,
+    instrument_id: document.getElementById('backtestInstrument').value,
+    start: document.getElementById('backtestStart').value,
+    end: document.getElementById('backtestEnd').value,
+    params_file: 'config/pde_runtime_overrides.json',
+  });
+  document.getElementById('controlStatus').textContent = JSON.stringify(out, null, 2);
+  setTimeout(loadControlStatus, 1500);
+});
+
+// Init
+initCharts();
+connect();
+applyTimeRange();
+loadControlStatus();
+setInterval(loadControlStatus, 3000);
+</script>
+</body>
+</html>

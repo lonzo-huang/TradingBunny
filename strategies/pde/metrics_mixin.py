@@ -82,10 +82,10 @@ class PDEMetricsMixin:
                 'Cumulative total PnL'
             )
             
-            self.log.info("📊 Prometheus metrics initialized")
+            self.log.info("[STATS] Prometheus metrics initialized")
             
         except ImportError:
-            self.log.warning("⚠️ prometheus_client not available, metrics disabled")
+            self.log.warning("[WARN] prometheus_client not available, metrics disabled")
             # Create dummy objects
             class DummyMetric:
                 def set(self, *args, **kwargs): pass

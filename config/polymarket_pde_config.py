@@ -158,6 +158,10 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     "ev_alpha": 0.001,                      # p(t)内部概率更新系数，BTC微动*p(t)更新
                     "phase_a_start_sec": 0.0,               # Phase A开始时间（秒），区间开始后的第N秒
                     "phase_a_end_sec": 240.0,               # Phase A结束时间（秒），默认240秒=4分钟
+                    "phase_a_min_token_price": 0.30,        # Phase A token价格下限，低于此不开仓（薄盘保护）
+                    "phase_a_max_token_price": 0.70,        # Phase A token价格上限，高于此不开仓
+                    "phase_a_min_btc_delta": 0.0003,        # Phase A BTC最小动量（0.03%），近零时不开仓
+                    "taker_fee_rate": 0.00072,              # Polymarket Crypto taker fee: C×rate×p×(1-p)
 
                     # ===== Phase B 趋势跟踪参数 =====
                     "phase_b_momentum_threshold_usd": 10.0, # Phase B动量阈值（USD），BTC偏移>$10才交易

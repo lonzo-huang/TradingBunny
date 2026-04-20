@@ -82,6 +82,15 @@ class PDEExecutionMixin:
         except Exception as e:
             self.log.error(f"[PERSIST-FAIL] fill event insert failed: {e}")
 
+    def _calc_taker_fee(self, size: float, price: float) -> float:
+        """Polymarket Crypto taker fee: C × rate × p × (1−p).
+
+        Fee peaks at p=0.5 and is zero at p=0 or p=1 (binary resolution).
+        """
+        rate = float(getattr(self.config, 'taker_fee_rate', 0.00072))
+        fee = size * rate * price * (1.0 - price)
+        return round(fee, 8) if fee > 0 else 0.0
+
     def _persist_position_event(
         self,
         event_type: str,
@@ -92,6 +101,7 @@ class PDEExecutionMixin:
         avg_price: float,
         unrealized_pnl: float,
         realized_pnl: float,
+        fee: float = 0.0,
     ) -> None:
         store = getattr(self, 'persistence_store', None)
         run_id = getattr(self, 'persistence_run_id', '')
@@ -110,6 +120,7 @@ class PDEExecutionMixin:
                 avg_price=avg_price,
                 unrealized_pnl=unrealized_pnl,
                 realized_pnl=realized_pnl,
+                fee=fee,
             )
             self.log.info(f"[PERSIST-OK] Position {event_type} persisted")
         except Exception as e:
@@ -122,6 +133,7 @@ class PDEExecutionMixin:
         phase: str,
         realized: float,
         unrealized: float,
+        fee: float = 0.0,
     ) -> None:
         store = getattr(self, 'persistence_store', None)
         run_id = getattr(self, 'persistence_run_id', '')
@@ -137,6 +149,7 @@ class PDEExecutionMixin:
                 unrealized=unrealized,
                 round_pnl=float(getattr(self, 'round_pnl', 0.0)),
                 total_pnl=float(getattr(self, 'total_pnl', 0.0)),
+                fee=fee,
             )
         except Exception as e:
             self.log.debug(f"[PERSIST] pnl snapshot insert failed ({event_type}): {e}")
@@ -296,16 +309,29 @@ class PDEExecutionMixin:
         pos['pending_open_ts'] = 0.0
 
         phase = pos.get('phase') or 'A'
-        exposure = pos['entry_price'] * pos['size']
+        entry_price = pos['entry_price']
+        size = pos['size']
+
+        # Charge entry fee
+        entry_fee = self._calc_taker_fee(size, entry_price)
+        pos['entry_fee'] = entry_fee
+        if entry_fee > 0:
+            self.round_pnl -= entry_fee
+            self.total_pnl -= entry_fee
+            self.cumulative_fees += entry_fee
+            self.log.info(f"[FEE] Entry fee {token_key}: {entry_fee:.6f} (size={size:.4f} p={entry_price:.4f})")
+
+        exposure = entry_price * size
         self._persist_position_event(
             event_type='position_opened',
             token=token_key,
             phase=phase,
             event=event,
-            position_size=pos['size'],
-            avg_price=pos['entry_price'],
+            position_size=size,
+            avg_price=entry_price,
             unrealized_pnl=0.0,
             realized_pnl=0.0,
+            fee=entry_fee,
         )
         self._persist_pnl_snapshot(
             event_type='position_opened',
@@ -313,6 +339,7 @@ class PDEExecutionMixin:
             phase=phase,
             realized=0.0,
             unrealized=0.0,
+            fee=entry_fee,
         )
         self._push_live_pnl_summary(phase=phase, realized=0.0, unrealized=0.0)
         try:
@@ -396,10 +423,23 @@ class PDEExecutionMixin:
             self.log.warning(f"[WARN] PositionClosed for unknown instrument: {event.instrument_id}")
             return
 
-        phase = self.positions[token_key].get('phase') or 'A'
-        realized = float(event.realized_pnl)
-        self.round_pnl += realized
-        self.total_pnl += realized
+        pos = self.positions[token_key]
+        phase = pos.get('phase') or 'A'
+        gross_realized = float(event.realized_pnl)
+
+        # Charge exit fee based on close price
+        exit_price = float(getattr(event, 'avg_px_close', 0.0) or 0.0)
+        exit_size = float(getattr(event, 'quantity', 0.0) or pos.get('size', 0.0))
+        exit_fee = self._calc_taker_fee(exit_size, exit_price) if exit_price > 0 else 0.0
+        entry_fee = float(pos.get('entry_fee', 0.0))
+        total_fee = entry_fee + exit_fee
+
+        net_realized = gross_realized - exit_fee
+        self.round_pnl += net_realized
+        self.total_pnl += net_realized
+        if exit_fee > 0:
+            self.cumulative_fees += exit_fee
+            self.log.info(f"[FEE] Exit fee {token_key}: {exit_fee:.6f} (p={exit_price:.4f})")
 
         self._persist_position_event(
             event_type='position_closed',
@@ -409,16 +449,18 @@ class PDEExecutionMixin:
             position_size=0.0,
             avg_price=float(getattr(event, 'avg_px_open', 0.0) or 0.0),
             unrealized_pnl=0.0,
-            realized_pnl=realized,
+            realized_pnl=net_realized,
+            fee=total_fee,
         )
         self._persist_pnl_snapshot(
             event_type='position_closed',
             token=token_key,
             phase=phase,
-            realized=realized,
+            realized=net_realized,
             unrealized=0.0,
+            fee=total_fee,
         )
-        self._push_live_pnl_summary(phase=phase, realized=realized, unrealized=0.0)
+        self._push_live_pnl_summary(phase=phase, realized=net_realized, unrealized=0.0)
 
         self._reset_local_position(token_key)
 
@@ -433,15 +475,18 @@ class PDEExecutionMixin:
                 phase=phase,
                 is_open=False,
                 unrealized_pnl=0.0,
-                realized_pnl=realized,
+                realized_pnl=net_realized,
                 quantity=0.0,
             )
             self.log.debug(
                 f"[WS] push_position token={token_key} is_open=False phase={phase} qty=0.000000 "
-                f"realized={realized:.4f}"
+                f"gross={gross_realized:.4f} fee={total_fee:.6f} net={net_realized:.4f}"
             )
 
-        self.log.info(f"[OK] Close confirmed {token_key.upper()} realized_pnl={realized:.4f}")
+        self.log.info(
+            f"[OK] Close confirmed {token_key.upper()} gross={gross_realized:.4f} "
+            f"fee={total_fee:.6f} net={net_realized:.4f}"
+        )
     
     def _place_order(self, instrument: Any, side: OrderSide,
                      price: float, size: float, label: str = "") -> bool:
@@ -619,6 +664,14 @@ class PDEExecutionMixin:
                 self._last_entry_reject_reason = "place_order_failed"
             return False
         
+        # Charge entry fee immediately on order submission
+        entry_fee = self._calc_taker_fee(size, price)
+        if entry_fee > 0:
+            self.round_pnl -= entry_fee
+            self.total_pnl -= entry_fee
+            self.cumulative_fees += entry_fee
+            self.log.info(f"[FEE] Entry fee {token_key}: {entry_fee:.6f} (size={size:.4f} p={price:.4f})")
+
         # Update position state - treat as immediately open for Sandbox
         self.positions[token_key].update({
             'open': True,
@@ -632,8 +685,9 @@ class PDEExecutionMixin:
             'close_label': None,
             'pending_open': False,
             'pending_open_ts': now_ts,
+            'entry_fee': entry_fee,
         })
-        
+
         # Persist position opened event immediately (don't rely on callback)
         self._persist_position_event(
             event_type='position_opened',
@@ -644,6 +698,7 @@ class PDEExecutionMixin:
             avg_price=price,
             unrealized_pnl=0.0,
             realized_pnl=0.0,
+            fee=entry_fee,
         )
         
         # Update trade counters
@@ -725,5 +780,76 @@ class PDEExecutionMixin:
                 self.log.info(f"💨 Exit requested {token_key.upper()} @ {trigger_price:.4f} (EV={ev:.4f})")
                 return True
             return False
-        
+
         return False
+
+    def _settle_phase_b_positions_at_rollover(self) -> None:
+        """Binary-resolution settlement for Phase B positions at rollover.
+
+        Called before state reset so instrument_id lookup still works.
+        Phase B tokens resolve to $1 (win) or $0 (lose); exit fee at resolution
+        is zero because p*(1-p) = 1*0 = 0 or 0*1 = 0.
+        """
+        btc_now = float(self.btc_price or 0.0)
+        btc_start = float(self.btc_start_price or btc_now)
+        btc_went_up = btc_now >= btc_start
+
+        for token_key in ('up', 'down'):
+            pos = self.positions[token_key]
+            if not pos.get('open') or pos.get('phase') != 'B':
+                continue
+
+            size = float(pos.get('size', 0.0))
+            entry_price = float(pos.get('entry_price', 0.0))
+            entry_fee = float(pos.get('entry_fee', 0.0))
+
+            wins = btc_went_up if token_key == 'up' else not btc_went_up
+            resolution_price = 1.0 if wins else 0.0
+
+            gross_pnl = (resolution_price - entry_price) * size
+            net_pnl = gross_pnl  # exit fee = 0 at binary resolution
+
+            self.round_pnl += net_pnl
+            self.total_pnl += net_pnl
+
+            outcome = "WIN" if wins else "LOSE"
+            self.log.info(
+                f"[SETTLE] Phase B {token_key.upper()} {outcome}: "
+                f"entry={entry_price:.4f} resolution={resolution_price:.1f} "
+                f"size={size:.4f} gross_pnl={gross_pnl:.4f} entry_fee={entry_fee:.6f}"
+            )
+
+            slug = getattr(self, 'current_market_slug', '') or ''
+            self._persist_position_event(
+                event_type='position_settled',
+                token=token_key,
+                phase='B',
+                event={'resolution_price': resolution_price, 'wins': wins, 'btc_went_up': btc_went_up},
+                position_size=0.0,
+                avg_price=resolution_price,
+                unrealized_pnl=0.0,
+                realized_pnl=net_pnl,
+                fee=entry_fee,  # total fee = entry_fee only (exit_fee = 0 at resolution)
+            )
+            self._persist_pnl_snapshot(
+                event_type='position_settled',
+                token=token_key,
+                phase='B',
+                realized=net_pnl,
+                unrealized=0.0,
+                fee=entry_fee,
+            )
+            if self.live_server:
+                try:
+                    self.live_server.push_position(
+                        token=token_key,
+                        phase='B',
+                        is_open=False,
+                        unrealized_pnl=0.0,
+                        realized_pnl=net_pnl,
+                        quantity=0.0,
+                    )
+                except Exception:
+                    pass
+
+            self._reset_local_position(token_key)

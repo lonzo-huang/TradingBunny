@@ -447,10 +447,36 @@ class PolymarketPDEStrategy(
                 last_ts = self._last_entry_attempt_ts.get(token_key, 0.0)
                 if now_ts - last_ts < self.config.entry_retry_cooldown_sec:
                     return
+
+                # ④ Token price range filter: avoid thin books at extremes
+                pa_min_price = float(getattr(self.config, 'phase_a_min_token_price', 0.30))
+                pa_max_price = float(getattr(self.config, 'phase_a_max_token_price', 0.70))
+                if not (pa_min_price <= mid <= pa_max_price):
+                    self.log.debug(
+                        f"[TRADE] Skip {token_key} Phase A: price {mid:.4f} outside [{pa_min_price}, {pa_max_price}]"
+                    )
+                    return
+
+                # ⑤ BTC momentum minimum filter: skip entries when BTC is flat
+                btc_momentum_min = float(getattr(self.config, 'phase_a_min_btc_delta', 0.0003))
+                if abs(delta_pct) < btc_momentum_min:
+                    self.log.debug(
+                        f"[TRADE] Skip {token_key} Phase A: |delta_pct| {abs(delta_pct):.6f} < {btc_momentum_min}"
+                    )
+                    return
+
+                # ⑥ Direction alignment filter: only trade with BTC trend
+                if signal_side == 'buy' and delta_pct < 0:
+                    self.log.debug(f"[TRADE] Skip {token_key} Phase A BUY: BTC trending down (delta={delta_pct:.6f})")
+                    return
+                if signal_side == 'sell' and delta_pct > 0:
+                    self.log.debug(f"[TRADE] Skip {token_key} Phase A SELL: BTC trending up (delta={delta_pct:.6f})")
+                    return
+
                 self._last_entry_attempt_ts[token_key] = now_ts
                 self.log.info(
                     f"[TRADE] Phase A {signal_side.upper()} signal: {token_key} ev={ev:.4f} "
-                    f"threshold=±{entry_threshold:.4f}"
+                    f"threshold=±{entry_threshold:.4f} mid={mid:.4f} delta={delta_pct:.6f}"
                 )
                 self.log.info(f"[TRADE] Attempting {token_key} {signal_side} @ {mid:.4f}")
                 result = self._enter_position(token_key, signal_side, mid, self.config.per_trade_usd / mid, phase)
@@ -518,7 +544,10 @@ class PolymarketPDEStrategy(
             self._pending_rollover_slug = new_slug
             self._last_rollover_block_log_ts = 0.0
 
-        # Close positions (must succeed before state reset)
+        # Phase B: binary settlement before closing (state still valid here)
+        self._settle_phase_b_positions_at_rollover()
+
+        # Close remaining positions (must succeed before state reset)
         if not self._close_all_open_positions():
             if now_ts - self._last_rollover_block_log_ts >= 5.0:
                 self._last_rollover_block_log_ts = now_ts

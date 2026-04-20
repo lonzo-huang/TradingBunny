@@ -59,6 +59,14 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     debug_raw_data: bool = False
     debug_ws: bool = False
 
+    # Phase A entry filters
+    phase_a_min_token_price: float = 0.30    # 低于此价格不开仓（避免极端薄盘）
+    phase_a_max_token_price: float = 0.70    # 高于此价格不开仓
+    phase_a_min_btc_delta: float = 0.0003   # BTC最小动量阈值（0.03%），小于此不交易
+
+    # Fee model
+    taker_fee_rate: float = 0.00072         # Polymarket Crypto taker fee rate
+
     # Persistence
     persistence_enabled: bool = True
     persistence_db_path: str = "data/pde/pde_runs.sqlite3"

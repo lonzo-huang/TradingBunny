@@ -256,6 +256,10 @@ class PDEExecutionMixin:
                         self.B_trades -= 1
                     # Phase B 仅尝试一次，失败后允许重试（重置标志）
                     self.tail_trade_done = False
+                elif phase == 'B_HEDGE':
+                    # Hedge order rejected: allow retry by resetting hedge-done flag
+                    hedge_done = getattr(self, '_phase_b_hedge_done', {})
+                    hedge_done[token_key] = False
                 # 重置仓位
                 self._reset_local_position(token_key)
                 try:
@@ -664,7 +668,7 @@ class PDEExecutionMixin:
 
         for token_key in ('up', 'down'):
             pos = self.positions[token_key]
-            if not pos.get('open') or pos.get('phase') != 'B':
+            if not pos.get('open') or pos.get('phase') not in ('B', 'B_HEDGE'):
                 continue
 
             entry_price = float(pos.get('entry_price', 0.0))
@@ -695,10 +699,11 @@ class PDEExecutionMixin:
             # 只记录入场时已扣除的 entry_fee
             entry_fee = float(pos.get('entry_fee', 0.0))
 
+            pos_phase = pos.get('phase', 'B')  # 'B' or 'B_HEDGE'
             self._persist_position_event(
                 event_type='position_closed',
                 token=token_key,
-                phase='B',
+                phase=pos_phase,
                 event={
                     'settlement_type': 'phase_b_resolution',
                     'btc_went_up': btc_went_up,
@@ -717,7 +722,7 @@ class PDEExecutionMixin:
             self._persist_pnl_snapshot(
                 event_type='phase_b_settled',
                 token=token_key,
-                phase='B',
+                phase=pos_phase,
                 realized=realized_pnl,
                 unrealized=0.0,
                 fee=entry_fee,

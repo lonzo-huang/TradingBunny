@@ -550,6 +550,11 @@ class PolymarketPDEStrategy(
                         self.tail_trade_done = True
                         self.log.info("[TRADE] Phase B momentum entry success")
 
+        # Phase B Hedge Guard check (runs every signal eval tick when in Phase B)
+        if in_phase_b:
+            delta_usd_abs = delta_p  # already computed above
+            self._check_phase_b_hedge(token_key, elapsed, remaining, delta_usd_abs)
+
         # Push phase state periodically (every 3 seconds)
         if not hasattr(self, '_last_phase_push_ts') or now_ts - self._last_phase_push_ts >= 3.0:
             self._last_phase_push_ts = now_ts
@@ -559,7 +564,103 @@ class PolymarketPDEStrategy(
                 phase_a_end=phase_a_end,
                 elapsed=elapsed
             )
-    
+
+    def _check_phase_b_hedge(
+        self,
+        token_key: str,
+        elapsed: float,
+        remaining: float,
+        delta_usd: float,
+    ) -> None:
+        """Phase B Hedge Guard: open a small counter-position when momentum reverses.
+
+        Fires once per round per Phase B position when all conditions are met:
+        - phase_b_hedge_enabled is True
+        - A Phase B position is open on token_key
+        - We are in the final phase_b_hedge_window_sec seconds of the round
+        - |delta_usd| has fallen below phase_b_hedge_delta_threshold_usd
+        """
+        if not getattr(self.config, 'phase_b_hedge_enabled', False):
+            return
+
+        pos = self.positions.get(token_key, {})
+        if not pos.get('open') or pos.get('phase') != 'B':
+            return
+
+        if self._phase_b_hedge_done.get(token_key, False):
+            return
+
+        hedge_window = float(getattr(self.config, 'phase_b_hedge_window_sec', 60.0))
+        if remaining > hedge_window:
+            return
+
+        hedge_threshold = float(getattr(self.config, 'phase_b_hedge_delta_threshold_usd', 10.0))
+        pos_side = pos.get('side')
+
+        # Trigger when BTC momentum has weakened (delta now inside ±threshold zone)
+        if pos_side == 'buy':
+            should_hedge = delta_usd < hedge_threshold
+        else:
+            should_hedge = delta_usd > -hedge_threshold
+
+        if not should_hedge:
+            return
+
+        # Mark done immediately to prevent re-entry on subsequent ticks
+        self._phase_b_hedge_done[token_key] = True
+
+        opposite_key = 'down' if token_key == 'up' else 'up'
+        opp_pos = self.positions.get(opposite_key, {})
+        if opp_pos.get('open') or opp_pos.get('pending_open'):
+            self.log.info(
+                f"[HEDGE] Skip hedge {token_key}→{opposite_key}: "
+                f"opposite already occupied"
+            )
+            return
+
+        opposite_instrument = self.down_instrument if opposite_key == 'down' else self.instrument
+        if opposite_instrument is None:
+            self.log.warning(f"[HEDGE] No instrument for {opposite_key}, cannot hedge")
+            return
+
+        try:
+            opp_quote = self.cache.quote_tick(opposite_instrument.id)
+            if opp_quote is None:
+                self.log.warning(f"[HEDGE] No quote for {opposite_key}, cannot hedge")
+                return
+            opp_bid = float(opp_quote.bid_price)
+            opp_ask = float(opp_quote.ask_price)
+            opp_mid = (opp_bid + opp_ask) / 2.0
+        except Exception as exc:
+            self.log.warning(f"[HEDGE] Quote fetch failed for {opposite_key}: {exc}")
+            return
+
+        if opp_mid <= 0:
+            return
+
+        pos_notional = float(pos.get('entry_price', 0.0)) * float(pos.get('size', 0.0))
+        hedge_pct = float(getattr(self.config, 'phase_b_hedge_size_pct', 0.01))
+        hedge_usd = pos_notional * hedge_pct
+        hedge_size = hedge_usd / opp_mid
+
+        self.log.info(
+            f"[HEDGE] Phase B Hedge Guard: {token_key}({pos_side})→hedge {opposite_key} "
+            f"delta_usd={delta_usd:+.2f} remaining={remaining:.1f}s "
+            f"pos_notional={pos_notional:.2f} hedge_usd={hedge_usd:.2f} "
+            f"hedge_pct={hedge_pct*100:.1f}% price={opp_mid:.4f}"
+        )
+
+        result = self._enter_position(
+            opposite_key, 'buy', opp_mid, hedge_size, 'B_HEDGE',
+            ev=0.0,
+            delta_pct=delta_usd / max(self.btc_price or 85000.0, 1.0),
+            btc_price=self.btc_price or 0.0,
+        )
+        if result:
+            self.log.info(f"[HEDGE] Hedge entry submitted: {opposite_key} @ {opp_mid:.4f}")
+        else:
+            self.log.warning(f"[HEDGE] Hedge entry failed for {opposite_key}")
+
     def check_rollover(self) -> None:
         """Check and handle market rollover.
 
@@ -606,6 +707,7 @@ class PolymarketPDEStrategy(
         self.tail_trade_done = False
         self.btc_start_price = self.btc_price
         self._order_map = {}  # 清除飞行中订单记录，避免跨 round 误判
+        self._phase_b_hedge_done = {'up': False, 'down': False}
 
         for token_key in ('up', 'down'):
             self.positions[token_key] = {

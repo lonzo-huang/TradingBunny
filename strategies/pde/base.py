@@ -61,6 +61,12 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     # PnL display
     pnl_display_interval_sec: float = 10.0
     
+    # Phase B Hedge Guard
+    phase_b_hedge_enabled: bool = False               # Enable Phase B reversal hedge
+    phase_b_hedge_window_sec: float = 60.0            # Trigger only in last T seconds of round
+    phase_b_hedge_delta_threshold_usd: float = 10.0   # Hedge if |delta_usd| drops below this
+    phase_b_hedge_size_pct: float = 0.01              # Hedge size as fraction of Phase B notional
+
     # Debug
     debug_raw_data: bool = False
     debug_ws: bool = False
@@ -133,6 +139,7 @@ class PDEStrategyBase(Strategy):
         self.tail_trade_done: bool = False
         self.phase_a_cumulative: Any | None = None
         self.phase_b_cumulative: Any | None = None
+        self._phase_b_hedge_done: dict[str, bool] = {'up': False, 'down': False}
         
         # Price history
         self.price_history: dict[str, Any] = {'up': None, 'down': None}

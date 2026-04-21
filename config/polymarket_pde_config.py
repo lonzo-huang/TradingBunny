@@ -173,6 +173,12 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     "tail_return": 0.10,                    # 尾部事件预期收益（10%），用于EV计算
                     "ev_threshold_tail": 0.0,               # 尾部事件EV阈值
 
+                    # ===== Phase B Hedge Guard =====
+                    "phase_b_hedge_enabled": True,           # Enable Phase B reversal hedge
+                    "phase_b_hedge_window_sec": 60.0,         # Only hedge in last T seconds of round
+                    "phase_b_hedge_delta_threshold_usd": 5.0, # Trigger when |delta_usd| drops below this
+                    "phase_b_hedge_size_pct": 0.02,           # Hedge size as fraction of Phase B notional
+
                     # ===== 风控与执行参数 =====
                     "max_A_trades": 6,                      # Phase A最大交易次数，防止过度交易
                     "spread_tolerance": 0.03,               # 价差容忍度（3%），超过此价差不交易

@@ -1317,6 +1317,115 @@ def run_trades(run_id: str) -> str:
 
     content += "</table></div>"
 
+    # ── Phase B Hedge Guard section ──
+    hedge_rows = query_db("""
+        SELECT
+            p_req.ts_iso   AS entry_time,
+            p_req.ts_ns    AS entry_ts_ns,
+            p_req.token,
+            p_req.phase,
+            COALESCE(p_req.round_slug, 'unknown') AS round_slug,
+            p_req.avg_price                        AS limit_price,
+            p_req.entry_context_json,
+            p_cls.ts_iso   AS exit_time,
+            p_cls.realized_pnl,
+            COALESCE(p_cls.fee, 0)                 AS fee,
+            p_cls.payload_json AS close_payload
+        FROM positions p_req
+        LEFT JOIN positions p_cls
+               ON p_cls.run_id    = p_req.run_id
+              AND p_cls.token     = p_req.token
+              AND p_cls.phase     = p_req.phase
+              AND p_cls.event_type IN ('position_closed', 'position_settled')
+              AND p_cls.ts_ns     > p_req.ts_ns
+        WHERE p_req.run_id     = ?
+          AND p_req.event_type = 'position_requested'
+          AND p_req.phase      = 'B_HEDGE'
+        ORDER BY p_req.ts_ns DESC
+        LIMIT 100
+    """, (run_id,))
+
+    if hedge_rows:
+        hedge_total_pnl = sum(float(r['realized_pnl'] or 0) for r in hedge_rows)
+        hedge_total_fee = sum(float(r['fee'] or 0) for r in hedge_rows)
+
+        content += """
+        <h3 style="margin-top:2rem;">Phase B Hedge Guard</h3>
+        <div class="card" style="overflow-x:auto;">
+        <table>
+            <tr>
+                <th>Time</th>
+                <th>Round</th>
+                <th>Hedge Token</th>
+                <th>Limit Price</th>
+                <th>BTC Delta at Trigger</th>
+                <th>Hedge Size USD</th>
+                <th>Exit Time</th>
+                <th>Realized PnL</th>
+                <th>Fees</th>
+            </tr>
+        """
+
+        for r in hedge_rows:
+            ec = {}
+            try:
+                ec = json.loads(r['entry_context_json'] or '{}')
+            except Exception:
+                pass
+
+            delta_pct_val = ec.get('delta_pct')
+            btc_price_val = ec.get('btc_price') or 85000.0
+            delta_usd_str = (
+                f"{float(delta_pct_val) * float(btc_price_val):+.2f} USD"
+                if delta_pct_val is not None else "N/A"
+            )
+
+            # Hedge size from limit_price × size (approximated via entry_context label)
+            hedge_usd_str = "N/A"
+            label = ec.get('label', '')
+            if 'hedge' in label.lower():
+                hedge_usd_str = label
+
+            round_short = r['round_slug']
+            if round_short and round_short != 'unknown':
+                parts = round_short.rsplit('-', 2)
+                round_short = '-'.join(parts[-2:]) if len(parts) >= 2 else round_short
+
+            pnl_val = float(r['realized_pnl'] or 0)
+            pnl_class = 'positive' if pnl_val >= 0 else 'negative'
+            fee_str = f"-{format_number(r['fee'], 4)}" if r['fee'] else "0.00"
+
+            content += f"""
+            <tr>
+                <td>{format_ts(r['entry_time'])}</td>
+                <td><small>{round_short}</small></td>
+                <td><span class="badge badge-{r['token']}">{r['token'].upper()}</span></td>
+                <td>{format_number(r['limit_price'], 4) if r['limit_price'] else 'N/A'}</td>
+                <td>{delta_usd_str}</td>
+                <td>{hedge_usd_str}</td>
+                <td>{format_ts(r['exit_time']) if r['exit_time'] else 'Open'}</td>
+                <td class="{pnl_class}">{format_number(pnl_val)}</td>
+                <td class="negative" style="font-size:11px">{fee_str}</td>
+            </tr>
+            """
+
+        content += f"""
+        </table>
+        <div style="padding:0.5rem 0; font-size:0.85rem; color:#8b949e;">
+            Hedge total PnL:
+            <span class="{'positive' if hedge_total_pnl >= 0 else 'negative'}">
+                {format_number(hedge_total_pnl)} USDC
+            </span>
+            &nbsp;|&nbsp; Total fees: <span class="negative">-{format_number(hedge_total_fee)} USDC</span>
+        </div>
+        </div>
+        """
+    else:
+        content += """
+        <h3 style="margin-top:2rem;">Phase B Hedge Guard</h3>
+        <div class="card"><p style="color:#8b949e;">No hedge trades recorded for this run.</p></div>
+        """
+
     return render_template_string(BASE_TEMPLATE, content=content, active_page="trades", run_id=run_id)
 
 

@@ -35,6 +35,10 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     ev_ema_alpha: float = 0.25
     ev_deadband: float = 0.005
     ev_alpha: float = 0.001             # p(t) 概率更新系数: p(t) = p(t-Δt) + α·ΔBTC
+    phase_a_min_btc_delta: float = 0.0003  # Phase A 最小 BTC 动量过滤（0.03%），低于此不开仓
+    taker_fee_rate: float = 0.0072         # Polymarket CLOB taker fee: 0.72% of notional
+    phase_a_min_token_price: float = 0.30  # Phase A token 价格下限，低于此不开仓（流动性不足）
+    phase_a_max_token_price: float = 0.70  # Phase A token 价格上限，高于此不开仓（流动性不足）
     max_A_trades: int = 6
     tail_start_threshold: float = 0.1
     phase_b_momentum_threshold_usd: float = 30.0  # $30 USD absolute price offset (bidirectional)

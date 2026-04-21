@@ -131,6 +131,7 @@ class PDEPersistenceStore:
         realized_pnl: float,
         round_slug: str = "",
         entry_context: dict | None = None,
+        fee: float = 0.0,
     ) -> None:
         ts_ns, ts_iso = self._extract_event_time(event)
         payload = self._to_json_dict(event)
@@ -140,8 +141,8 @@ class PDEPersistenceStore:
                 run_id, ts_ns, ts_iso, event_type,
                 token, phase, instrument_id,
                 position_size, avg_price, unrealized_pnl, realized_pnl,
-                payload_json, round_slug, entry_context_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payload_json, round_slug, entry_context_json, fee
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -158,6 +159,7 @@ class PDEPersistenceStore:
                 json.dumps(payload, ensure_ascii=False),
                 round_slug or "",
                 json.dumps(entry_context or {}, ensure_ascii=False),
+                fee,
             ),
         )
 
@@ -171,6 +173,7 @@ class PDEPersistenceStore:
         unrealized: float,
         round_pnl: float,
         total_pnl: float,
+        fee: float = 0.0,
     ) -> None:
         now = datetime.now(timezone.utc)
         self._execute(
@@ -178,8 +181,8 @@ class PDEPersistenceStore:
             INSERT INTO pnl(
                 run_id, ts_ns, ts_iso, event_type,
                 token, phase, realized_pnl, unrealized_pnl,
-                round_pnl, total_pnl
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                round_pnl, total_pnl, fee
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -192,6 +195,7 @@ class PDEPersistenceStore:
                 unrealized,
                 round_pnl,
                 total_pnl,
+                fee,
             ),
         )
 
@@ -326,7 +330,8 @@ class PDEPersistenceStore:
                     realized_pnl REAL,
                     payload_json TEXT,
                     round_slug TEXT DEFAULT '',
-                    entry_context_json TEXT DEFAULT '{}'
+                    entry_context_json TEXT DEFAULT '{}',
+                    fee REAL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS pnl (
@@ -340,7 +345,8 @@ class PDEPersistenceStore:
                     realized_pnl REAL,
                     unrealized_pnl REAL,
                     round_pnl REAL,
-                    total_pnl REAL
+                    total_pnl REAL,
+                    fee REAL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS market_data (
@@ -379,11 +385,19 @@ class PDEPersistenceStore:
             for col, definition in [
                 ("round_slug", "TEXT DEFAULT ''"),
                 ("entry_context_json", "TEXT DEFAULT '{}'"),
+                ("fee", "REAL DEFAULT 0"),
             ]:
                 try:
                     cur.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
                 except Exception:
                     pass  # Column already exists
+            for col, definition in [
+                ("fee", "REAL DEFAULT 0"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE pnl ADD COLUMN {col} {definition}")
+                except Exception:
+                    pass
             self._conn.commit()
 
     @staticmethod

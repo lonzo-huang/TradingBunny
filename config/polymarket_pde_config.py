@@ -153,6 +153,10 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     # ===== Phase A EV套利参数 =====
                     "ev_threshold_A": 0.05,                 # Phase A EV阈值，|EV|>0.05才触发交易
                     "ev_entry_hysteresis": 0.01,            # EV入场滞回区间，防止频繁进出
+                    "phase_a_min_btc_delta": 0.0001,        # Phase A BTC最小动量（0.03%），近零时不开仓
+                    "taker_fee_rate": 0.0072,               # Polymarket CLOB taker fee: 0.72% of notional
+                    "phase_a_min_token_price": 0.30,        # Phase A token价格下限，低于此不开仓
+                    "phase_a_max_token_price": 0.70,        # Phase A token价格上限，高于此不开仓
                     "ev_ema_alpha": 0.25,                   # EV平滑系数，越大对新数据越敏感
                     "ev_deadband": 0.005,                   # EV死区，小于此值的波动被忽略
                     "ev_alpha": 0.001,                      # p(t)内部概率更新系数，BTC微动*p(t)更新

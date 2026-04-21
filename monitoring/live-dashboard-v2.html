@@ -931,12 +931,15 @@ const handlers = {
     phaseState.round = m.new_slug || '—';
     document.getElementById('roundBadge').textContent = `Round: ${phaseState.round}`;
     addEvent('phase', { phase: 'ROLLOVER', round: phaseState.round });
-    // Clear chart data
-    Object.values(tvSeries).forEach(s => { if (s && s.setData) s.setData([]); });
-    // Clear persisted data for new round
-    dataStore.btc = []; dataStore.up = []; dataStore.down = [];
+    // Clear per-round chart series (UP/DOWN/EV/latency) but preserve continuous BTC data
+    const BTC_SERIES = new Set(['btc', 'btcCompare']);
+    Object.entries(tvSeries).forEach(([key, s]) => {
+      if (!BTC_SERIES.has(key) && s && s.setData) s.setData([]);
+    });
+    // Clear per-round data stores; keep btc continuous
+    dataStore.up = []; dataStore.down = [];
     localStorage.removeItem(STORAGE_KEY);
-    console.log('🔄 Rollover: Cleared chart data and localStorage for new round');
+    console.log('🔄 Rollover: Cleared per-round chart data for new round (BTC preserved)');
   },
   
   anomaly: (m) => {

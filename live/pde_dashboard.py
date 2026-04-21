@@ -237,25 +237,25 @@ def format_number(n: float | None, decimals: int = 2) -> str:
 
 
 EXIT_REASON_LABELS = {
-    'exit_ev_up': 'EV信号反转',
-    'exit_ev_down': 'EV信号反转',
-    'exit_tp_up': '止盈',
-    'exit_tp_down': '止盈',
-    'exit_sl_up': '止损',
-    'exit_sl_down': '止损',
-    'close_up': '轮次强平',
-    'close_down': '轮次强平',
+    'exit_ev_up': 'EV reversal',
+    'exit_ev_down': 'EV reversal',
+    'exit_tp_up': 'Take profit',
+    'exit_tp_down': 'Take profit',
+    'exit_sl_up': 'Stop loss',
+    'exit_sl_down': 'Stop loss',
+    'close_up': 'Round force close',
+    'close_down': 'Round force close',
 }
 
 
 def human_exit_reason(label: str | None) -> str:
-    """Map internal label to human-readable Chinese reason."""
+    """Map internal label to human-readable reason."""
     if not label:
         return 'N/A'
     if label in EXIT_REASON_LABELS:
         return EXIT_REASON_LABELS[label]
     if label.startswith('phase_a_timeout'):
-        return 'Phase A超时'
+        return 'Phase A timeout'
     return label
 
 
@@ -531,17 +531,35 @@ def run_orders(run_id: str) -> str:
                 </tr>
     """
 
+    def normalize_side(value) -> str:
+        if value is None:
+            return "-"
+        s = str(value).strip().upper()
+        if s in ("1", "BUY", "TRUE"):
+            return "BUY"
+        if s in ("2", "SELL", "FALSE"):
+            return "SELL"
+        return s or "-"
+
+    def normalize_status(value) -> str:
+        if value is None:
+            return "-"
+        s = str(value).strip().upper()
+        return s or "-"
+
     for order in orders:
-        status_class = "badge-filled" if order['status'] == 'FILLED' else "badge-submitted"
-        side_str = order['side'] or '-'
+        side_str = normalize_side(order['side'])
+        status_str = normalize_status(order['status'])
+        status_class = "badge-filled" if status_str == 'FILLED' else "badge-submitted"
+        side_badge_class = "buy" if side_str == "BUY" else "sell" if side_str == "SELL" else "a"
         content += f"""
                 <tr>
                     <td>{format_ts(order['ts_iso'])}</td>
                     <td>{order['event_type']}</td>
-                    <td><span class="badge badge-{side_str.lower() if side_str else 'a'}">{side_str}</span></td>
+                    <td><span class="badge badge-{side_badge_class}">{side_str}</span></td>
                     <td>{format_number(order['quantity'])}</td>
                     <td>{format_number(order['price'])}</td>
-                    <td><span class="badge {status_class}">{order['status']}</span></td>
+                    <td><span class="badge {status_class}">{status_str}</span></td>
                     <td><code>{order['client_order_id'][:30] if order['client_order_id'] else '-'}</code></td>
                 </tr>
         """
@@ -883,17 +901,26 @@ def run_pnl(run_id: str) -> str:
     realized_b = [row['realized_pnl'] or 0 for row in pnl_b]
     total_b = [row['total_pnl'] or 0 for row in pnl_b]
 
-    # Summary — use only realized from position_closed
-    realized_a_total = query_db("""
-        SELECT COALESCE(SUM(realized_pnl), 0) as val FROM positions
-        WHERE run_id = ? AND phase = 'A' AND event_type = 'position_closed'
-    """, (run_id,), one=True)['val']
-    realized_b_total = query_db("""
-        SELECT COALESCE(SUM(realized_pnl), 0) as val FROM positions
-        WHERE run_id = ? AND phase = 'B' AND event_type = 'position_closed'
-    """, (run_id,), one=True)['val']
+    # Summary — include both position_closed and position_settled (Phase B binary resolution)
+    summary_a = query_db("""
+        SELECT COALESCE(SUM(realized_pnl), 0) as net_pnl,
+               COALESCE(SUM(fee), 0) as total_fee
+        FROM positions
+        WHERE run_id = ? AND phase = 'A' AND event_type IN ('position_closed', 'position_settled')
+    """, (run_id,), one=True)
+    summary_b = query_db("""
+        SELECT COALESCE(SUM(realized_pnl), 0) as net_pnl,
+               COALESCE(SUM(fee), 0) as total_fee
+        FROM positions
+        WHERE run_id = ? AND phase = 'B' AND event_type IN ('position_closed', 'position_settled')
+    """, (run_id,), one=True)
 
+    realized_a_total = summary_a['net_pnl']
+    realized_b_total = summary_b['net_pnl']
+    fee_a_total = summary_a['total_fee']
+    fee_b_total = summary_b['total_fee']
     grand_total = realized_a_total + realized_b_total
+    grand_fees = fee_a_total + fee_b_total
 
     content = f"""
         <h2>PnL by Phase</h2>
@@ -912,20 +939,24 @@ def run_pnl(run_id: str) -> str:
                 <tr>
                     <th>Phase</th>
                     <th>PnL 快照数</th>
-                    <th>已实现 PnL（已平仓）</th>
+                    <th>手续费（入场+出场）</th>
+                    <th>已实现 PnL（扣费后）</th>
                 </tr>
                 <tr>
                     <td><span class="badge badge-a">Phase A</span></td>
                     <td>{len(pnl_a)}</td>
+                    <td class="negative">-{format_number(fee_a_total, 4)}</td>
                     <td class="{'positive' if realized_a_total >= 0 else 'negative'}">{format_number(realized_a_total)}</td>
                 </tr>
                 <tr>
                     <td><span class="badge badge-b">Phase B</span></td>
                     <td>{len(pnl_b)}</td>
+                    <td class="negative">-{format_number(fee_b_total, 4)}</td>
                     <td class="{'positive' if realized_b_total >= 0 else 'negative'}">{format_number(realized_b_total)}</td>
                 </tr>
                 <tr style="border-top: 2px solid #30363d; font-weight: bold;">
                     <td colspan="2">合计</td>
+                    <td class="negative">-{format_number(grand_fees, 4)}</td>
                     <td class="{'positive' if grand_total >= 0 else 'negative'}">{format_number(grand_total)}</td>
                 </tr>
             </table>
@@ -1067,11 +1098,13 @@ def run_trades(run_id: str) -> str:
             token,
             phase,
             realized_pnl,
+            COALESCE(fee, 0) as fee,
             payload_json as close_payload,
+            event_type,
             ROW_NUMBER() OVER (PARTITION BY run_id, token, phase ORDER BY ts_ns) as seq_no
         FROM positions
         WHERE run_id = ?
-          AND event_type = 'position_closed'
+          AND event_type IN ('position_closed', 'position_settled')
         ORDER BY ts_ns ASC
     """, (run_id,))
 
@@ -1151,6 +1184,7 @@ def run_trades(run_id: str) -> str:
 
         exit_label = extract_exit_reason_label(close_req_payload)
 
+        is_settled = cls['event_type'] == 'position_settled'
         trades.append({
             'entry_time': req['entry_time'] if req else None,
             'entry_ts_ns': req['entry_ts_ns'] if req else None,
@@ -1158,6 +1192,7 @@ def run_trades(run_id: str) -> str:
             'exit_ts_ns': cls['exit_ts_ns'],
             'token': cls['token'] or 'up',
             'phase': cls['phase'] or 'A',
+            'fee': float(cls['fee'] or 0.0),
             'round_slug': req['round_slug'] if req else 'unknown',
             'limit_price': limit_price,
             'avg_px_open': cp['avg_px_open'],
@@ -1165,8 +1200,8 @@ def run_trades(run_id: str) -> str:
             'slippage': slippage,
             'duration_str': duration_str,
             'realized_pnl': cls['realized_pnl'],
-            'exit_label': exit_label,
-            'exit_reason_human': human_exit_reason(exit_label),
+            'exit_label': 'settlement' if is_settled else exit_label,
+            'exit_reason_human': '🏁 Binary Settlement' if is_settled else human_exit_reason(exit_label),
             'ev': ec['ev'],
             'delta_pct': ec['delta_pct'],
             'btc_price_entry': ec['btc_price'],
@@ -1178,6 +1213,7 @@ def run_trades(run_id: str) -> str:
 
     # Summary stats
     total_pnl = sum(t['realized_pnl'] or 0 for t in trades)
+    total_fees = sum(t['fee'] or 0 for t in trades)
     winning_trades = sum(1 for t in trades if (t['realized_pnl'] or 0) > 0)
     losing_trades = sum(1 for t in trades if (t['realized_pnl'] or 0) < 0)
     win_rate = (winning_trades / len(trades) * 100) if trades else 0.0
@@ -1203,8 +1239,12 @@ def run_trades(run_id: str) -> str:
                 <div class="stat-value">{format_number(win_rate)}%</div>
             </div>
             <div class="stat-box">
-                <div class="stat-label">Total PnL</div>
+                <div class="stat-label">Total PnL (After Fees)</div>
                 <div class="stat-value {'positive' if total_pnl >= 0 else 'negative'}">{format_number(total_pnl)} USDC</div>
+            </div>
+            <div class="stat-box" style="border-left-color: #d29922;">
+                <div class="stat-label">Total Fees</div>
+                <div class="stat-value negative">-{format_number(total_fees)} USDC</div>
             </div>
         </div>
 
@@ -1212,20 +1252,21 @@ def run_trades(run_id: str) -> str:
         <div class="card" style="overflow-x: auto;">
         <table>
             <tr>
-                <th>时间</th>
-                <th>轮次</th>
+                <th>Time</th>
+                <th>Round</th>
                 <th>Token</th>
-                <th>阶段</th>
-                <th>入场EV</th>
-                <th>BTC delta</th>
-                <th>BTC价格</th>
-                <th>限价单</th>
-                <th>实际入场均价</th>
-                <th>滑点</th>
-                <th>实际出场均价</th>
-                <th>持仓时长</th>
-                <th>出场原因</th>
-                <th>盈亏</th>
+                <th>Phase</th>
+                <th>Entry EV</th>
+                <th>BTC Delta</th>
+                <th>BTC Price</th>
+                <th>Limit Price</th>
+                <th>Avg Entry Price</th>
+                <th>Slippage</th>
+                <th>Avg Exit Price</th>
+                <th>Duration</th>
+                <th>Exit Reason</th>
+                <th>Fees</th>
+                <th>PnL (Net)</th>
             </tr>
     """
 
@@ -1253,6 +1294,7 @@ def run_trades(run_id: str) -> str:
             parts = round_short.rsplit('-', 2)
             round_short = '-'.join(parts[-2:]) if len(parts) >= 2 else round_short
 
+        fee_str = f"-{format_number(t['fee'], 4)}" if t['fee'] else "0.00"
         content += f"""
             <tr>
                 <td>{format_ts(t['entry_time'])}</td>
@@ -1268,6 +1310,7 @@ def run_trades(run_id: str) -> str:
                 <td>{avg_close_str}</td>
                 <td>{t['duration_str']}</td>
                 <td>{t['exit_reason_human']}</td>
+                <td class="negative" style="font-size:11px">{fee_str}</td>
                 <td class="{pnl_class}">{format_number(t['realized_pnl'])}</td>
             </tr>
         """

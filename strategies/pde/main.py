@@ -217,6 +217,10 @@ class PolymarketPDEStrategy(
             'ev_deadband': float,
             'phase_a_start_sec': float,
             'phase_a_end_sec': float,
+            'phase_a_min_btc_delta': float,
+            'taker_fee_rate': float,
+            'phase_a_min_token_price': float,
+            'phase_a_max_token_price': float,
             'phase_b_start_sec': float,
             'phase_b_momentum_threshold_usd': float,
             'phase_b_max_token_price': float,
@@ -455,10 +459,41 @@ class PolymarketPDEStrategy(
                 last_ts = self._last_entry_attempt_ts.get(token_key, 0.0)
                 if now_ts - last_ts < self.config.entry_retry_cooldown_sec:
                     return
+
+                # token 价格区间过滤：仅在流动性合理的中间区间交易
+                pa_min_price = getattr(self.config, 'phase_a_min_token_price', 0.30)
+                pa_max_price = getattr(self.config, 'phase_a_max_token_price', 0.70)
+                if not (pa_min_price <= mid <= pa_max_price):
+                    self.log.debug(
+                        f"[SKIP] Phase A {token_key}: price={mid:.4f} 超出区间 "
+                        f"[{pa_min_price:.2f}, {pa_max_price:.2f}]，跳过"
+                    )
+                    return
+
+                # ④ BTC 动量过滤：BTC 方向不明时 EV 信号是噪声，不开仓
+                btc_momentum_min = getattr(self.config, 'phase_a_min_btc_delta', 0.0003)
+                if abs(delta_pct) < btc_momentum_min:
+                    self.log.debug(
+                        f"[SKIP] Phase A {token_key}: BTC delta={delta_pct:.5f} < min={btc_momentum_min:.5f}，无方向性"
+                    )
+                    return
+
+                # ⑤ 顺势过滤：只做与 BTC 方向一致的 EV 信号，不逆势交易
+                if signal_side == 'buy' and delta_pct < 0:
+                    self.log.debug(
+                        f"[SKIP] Phase A {token_key}: EV看多但BTC在跌 delta={delta_pct:.5f}，跳过逆势"
+                    )
+                    return
+                if signal_side == 'sell' and delta_pct > 0:
+                    self.log.debug(
+                        f"[SKIP] Phase A {token_key}: EV看空但BTC在涨 delta={delta_pct:.5f}，跳过逆势"
+                    )
+                    return
+
                 self._last_entry_attempt_ts[token_key] = now_ts
                 self.log.info(
                     f"[TRADE] Phase A {signal_side.upper()} signal: {token_key} ev={ev:.4f} "
-                    f"threshold=±{entry_threshold:.4f}"
+                    f"threshold=±{entry_threshold:.4f} btc_delta={delta_pct:+.5f}"
                 )
                 self.log.info(f"[TRADE] Attempting {token_key} {signal_side} @ {mid:.4f}")
                 result = self._enter_position(
@@ -541,7 +576,10 @@ class PolymarketPDEStrategy(
             self._pending_rollover_slug = new_slug
             self._last_rollover_block_log_ts = 0.0
 
-        # Attempt to close positions, but proceed regardless (force-close semantics)
+        # Phase B: settle with binary resolution PnL before any state reset
+        self._settle_phase_b_positions_at_rollover()
+
+        # Attempt to close remaining (Phase A) positions
         close_attempted = self._close_all_open_positions()
         if not close_attempted:
             # Log warning but don't block rollover - real Polymarket force-closes at expiry

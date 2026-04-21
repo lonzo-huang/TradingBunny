@@ -164,14 +164,11 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     "phase_a_end_sec": 240.0,               # Phase A结束时间（秒），默认240秒=4分钟
 
                     # ===== Phase B 趋势跟踪参数 =====
-                    "phase_b_start_sec": 240.0,             # Phase B开始时间（秒），独立于phase_a_end_sec
+                    "phase_b_start_sec": 230.0,             # Phase B开始时间（秒），独立于phase_a_end_sec
                     "phase_b_max_token_price": 0.97,        # Phase B不入场的token价格上限（近解算无流动性）
                     "phase_b_momentum_threshold_usd": 10.0, # Phase B动量阈值（USD），BTC偏移>$10才交易
                     "take_profit_pct": 0.30,                # 止盈百分比，盈利30%时自动平仓
                     "stop_loss_pct": 0.20,                  # 止损百分比，亏损20%时自动平仓
-                    "delta_tail_min": 5.0,                  # 尾部事件最小偏移（USD），用于尾部风险管理
-                    "tail_return": 0.10,                    # 尾部事件预期收益（10%），用于EV计算
-                    "ev_threshold_tail": 0.0,               # 尾部事件EV阈值
 
                     # ===== Phase B Hedge Guard =====
                     "phase_b_hedge_enabled": True,           # Enable Phase B reversal hedge

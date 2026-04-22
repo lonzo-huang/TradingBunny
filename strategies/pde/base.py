@@ -66,6 +66,11 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     phase_b_hedge_window_sec: float = 60.0            # Trigger only in last T seconds of round
     phase_b_hedge_delta_threshold_usd: float = 10.0   # Hedge if |delta_usd| drops below this
     phase_b_hedge_size_pct: float = 0.01              # Hedge size as fraction of Phase B notional
+    phase_b_sl_tp_enabled: bool = False               # False = hold B/B_HEDGE to binary resolution; True = apply SL/TP
+
+    # Hot-reload
+    hot_config_path: str = "config/pde_runtime_config.json"
+    hot_config_check_interval_sec: float = 5.0
 
     # Debug
     debug_raw_data: bool = False
@@ -198,6 +203,10 @@ class PDEStrategyBase(Strategy):
         
         # Live streaming
         self.live_server: Any | None = None
+
+        # Hot-reload state
+        self._hot_config_mtime: float = 0.0
+        self._last_hot_config_check_ts: float = 0.0
 
         # Persistence
         self.persistence_store: Any | None = None

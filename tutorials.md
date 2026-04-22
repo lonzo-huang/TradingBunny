@@ -4,6 +4,9 @@
 > **适用对象**: 量化开发者、策略研究员、学习者  
 > **用途**: AI 工具编程参考文档
 
+python live/pde_dashboard.py --db data/pde/pde_runs.sqlite3
+python live/run_polymarket_pde.py --mode sandbox 2>&1
+
 ---
 
 ## 目录

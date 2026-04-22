@@ -910,10 +910,10 @@ class PDEExecutionMixin:
 
         self._push_live_position_mark(token_key, mark_price)
 
-        # Phase B 仓位：不做任何中途退出，持仓至轮次结束由 rollover 强制平仓
-        # 目的是完整吃趋势利润（token 向 $1 收敛）
-        if pos.get('phase') == 'B':
-            return False
+        # Phase B / B_HEDGE: hold to binary resolution unless phase_b_sl_tp_enabled=True
+        if pos.get('phase') in ('B', 'B_HEDGE'):
+            if not getattr(self.config, 'phase_b_sl_tp_enabled', False):
+                return False
 
         trigger_price = self._trigger_price_for_exit(pos, bid, ask, mark_price)
         entry = float(pos.get('entry_price', 0.0))

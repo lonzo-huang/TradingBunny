@@ -341,27 +341,27 @@ class PolymarketPDEStrategy(
             delta_p = 0.0
             delta_p_pct = 0.0
         
-        # Trend strength score: |ΔP| × w(t)
+        # Trend strength score: |ΔP| × w(t) — for logging/sizing only, NOT for entry gate
         trend_score = abs(delta_p_pct) * time_weight
-        
-        # Threshold check
+
+        # Threshold check: direct USD comparison (no time_weight scaling)
+        # time_weight was previously included here, making Phase B impossible to trigger
+        # early in the window (time_weight≈0 → effective threshold ≈ ∞)
         threshold_usd = float(getattr(self.config, 'phase_b_momentum_threshold_usd', 30.0))
         btc_price_for_th = self.btc_price or self.btc_start_price
         if btc_price_for_th is None or btc_price_for_th <= 0:
             btc_price_for_th = 85000.0  # Reasonable default BTC price
         threshold_pct = threshold_usd / btc_price_for_th
-        
+
         phase_b_target = 'up' if delta_p > 0 else 'down' if delta_p < 0 else 'flat'
-        if trend_score < threshold_pct:
+        if abs(delta_p_pct) < threshold_pct:
             phase_b_target = 'none'
 
         if in_phase_b and (self.config.debug_raw_data or self.config.debug_ws):
-            delta_usd = delta_pct * (self.btc_price or self.btc_start_price or 85000)
             self.log.info(
-                f"[PHASE_B_DEBUG] token={token_key} delta_usd={delta_usd:+.1f} "
-                f"trend_score={trend_score:.6f} time_weight={time_weight:.3f} "
-                f"ev={ev:.4f} tail_cond={tail_cond} "
-                f"th=${threshold_usd:.0f} target={phase_b_target}"
+                f"[PHASE_B_DEBUG] token={token_key} delta_usd={delta_p:+.1f} "
+                f"th=${threshold_usd:.0f} time_weight={time_weight:.3f} "
+                f"trend_score={trend_score:.6f} ev={ev:.4f} target={phase_b_target}"
             )
 
         # Push to dashboard with new metrics
@@ -795,7 +795,96 @@ class PolymarketPDEStrategy(
         
         # Check rollover
         self.check_rollover()
-        
+
         # Periodic maintenance
         self._check_flip_stats_refresh()
         self._update_metrics()
+        self._check_hot_config(now_ts)
+
+    # ── Hot-reload ──────────────────────────────────────────────────────────
+
+    # Parameters that can be safely updated at runtime without restart.
+    # Structural params (instrument slugs, db paths, venue names) are excluded.
+    _HOT_RELOAD_PARAMS: frozenset = frozenset({
+        # Phase A
+        "ev_threshold_A", "ev_entry_hysteresis", "ev_ema_alpha", "ev_deadband", "ev_alpha",
+        "phase_a_start_sec", "phase_a_end_sec",
+        "phase_a_min_token_price", "phase_a_max_token_price", "phase_a_min_btc_delta",
+        "max_A_trades",
+        # Phase B
+        "phase_b_start_sec", "phase_b_momentum_threshold_usd", "phase_b_max_token_price",
+        # Phase B Hedge Guard
+        "phase_b_hedge_enabled", "phase_b_hedge_window_sec",
+        "phase_b_hedge_delta_threshold_usd", "phase_b_hedge_size_pct",
+        "phase_b_sl_tp_enabled",
+        # Risk / execution
+        "take_profit_pct", "stop_loss_pct",
+        "taker_fee_rate", "spread_tolerance",
+        "signal_eval_interval_sec", "close_retry_interval_sec",
+        "entry_retry_cooldown_sec",
+        # BTC
+        "btc_jump_threshold_bps",
+        # Trade size
+        "per_trade_usd",
+        # Debug
+        "debug_raw_data", "debug_ws",
+        # Hot-reload interval itself
+        "hot_config_check_interval_sec",
+    })
+
+    def _check_hot_config(self, now_ts: float) -> None:
+        """Reload runtime config from JSON file if it has been modified."""
+        interval = float(getattr(self.config, 'hot_config_check_interval_sec', 5.0))
+        if now_ts - self._last_hot_config_check_ts < interval:
+            return
+        self._last_hot_config_check_ts = now_ts
+
+        path = getattr(self.config, 'hot_config_path', '')
+        if not path:
+            return
+
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+
+        if mtime <= self._hot_config_mtime:
+            return
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                new_values: dict = json.load(f)
+        except Exception as exc:
+            self.log.warning(f"[HOT-CONFIG] Failed to parse {path}: {exc}")
+            return
+
+        self._hot_config_mtime = mtime
+        changed: list[str] = []
+
+        for key, new_val in new_values.items():
+            if key.startswith('_'):  # ignore comment/metadata fields
+                continue
+            if key not in self._HOT_RELOAD_PARAMS:
+                self.log.warning(f"[HOT-CONFIG] Skipping unsafe/unknown param: {key!r}")
+                continue
+            old_val = getattr(self.config, key, None)
+            if old_val == new_val:
+                continue
+            try:
+                # Cast to original type to avoid type drift
+                if isinstance(old_val, bool):
+                    new_val = bool(new_val)
+                elif isinstance(old_val, int):
+                    new_val = int(new_val)
+                elif isinstance(old_val, float):
+                    new_val = float(new_val)
+                object.__setattr__(self.config, key, new_val)
+                changed.append(f"{key}: {old_val!r} → {new_val!r}")
+            except Exception as exc:
+                self.log.warning(f"[HOT-CONFIG] Failed to update {key!r}: {exc}")
+
+        if changed:
+            self.log.info(
+                f"[HOT-CONFIG] Reloaded {len(changed)} param(s) from {path}:\n"
+                + "\n".join(f"  {c}" for c in changed)
+            )

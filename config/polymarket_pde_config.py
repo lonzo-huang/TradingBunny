@@ -198,6 +198,10 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     "persistence_db_path": "data/pde/pde_runs.sqlite3",  # SQLite数据库路径
                     "persistence_record_market_data": True, # 是否记录市场数据（tick/quotes）
                     "persistence_export_dir": "data/pde/exports",      # 数据导出目录
+
+                    # ===== 热加载 =====
+                    "hot_config_path": "config/pde_runtime_config.json",  # 运行时热加载配置文件
+                    "hot_config_check_interval_sec": 5.0,                 # 检查文件变更的间隔（秒）
                 },
             ),
         ],

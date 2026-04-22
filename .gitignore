@@ -63,3 +63,5 @@ live/__pycache__/
 config/__pycache__/
 strategies/**/__pycache__/
 utils/__pycache__/
+
+.claude/worktrees/

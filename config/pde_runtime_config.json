@@ -1,0 +1,43 @@
+{
+  "_comment": "Hot-reload config for PolymarketPDEStrategy. Edit and save — changes apply within 5 seconds without restart.",
+  "_unsafe_params": "market_base_slug / market_interval_minutes / persistence_* / order_id_tag are NOT hot-reloadable.",
+
+  "per_trade_usd": 100.0,
+
+  "ev_threshold_A": 0.05,
+  "ev_entry_hysteresis": 0.01,
+  "ev_ema_alpha": 0.25,
+  "ev_deadband": 0.005,
+  "ev_alpha": 0.001,
+  "phase_a_start_sec": 0.0,
+  "phase_a_end_sec": 0.0,
+  "phase_a_min_token_price": 0.30,
+  "phase_a_max_token_price": 0.70,
+  "phase_a_min_btc_delta": 0.0001,
+  "max_A_trades": 6,
+
+  "phase_b_start_sec": 230.0,
+  "phase_b_momentum_threshold_usd": 9.0,
+  "phase_b_max_token_price": 0.97,
+
+  "phase_b_hedge_enabled": true,
+  "phase_b_hedge_window_sec": 60.0,
+  "phase_b_hedge_delta_threshold_usd": 5.0,
+  "phase_b_hedge_size_pct": 0.02,
+  "phase_b_sl_tp_enabled": false,
+
+  "take_profit_pct": 0.30,
+  "stop_loss_pct": 0.20,
+  "taker_fee_rate": 0.0072,
+  "spread_tolerance": 0.03,
+  "signal_eval_interval_sec": 0.5,
+  "close_retry_interval_sec": 3.0,
+  "entry_retry_cooldown_sec": 1.0,
+
+  "btc_jump_threshold_bps": 5.0,
+
+  "debug_raw_data": true,
+  "debug_ws": false,
+
+  "hot_config_check_interval_sec": 5.0
+}

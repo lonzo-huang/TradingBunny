@@ -938,9 +938,9 @@ def run_pnl(run_id: str) -> str:
             <table>
                 <tr>
                     <th>Phase</th>
-                    <th>PnL 快照数</th>
-                    <th>手续费（入场+出场）</th>
-                    <th>已实现 PnL（扣费后）</th>
+                    <th>PnL Snapshots</th>
+                    <th>Fees (Entry+Exit)</th>
+                    <th>Realized PnL (After Fees)</th>
                 </tr>
                 <tr>
                     <td><span class="badge badge-a">Phase A</span></td>
@@ -955,7 +955,7 @@ def run_pnl(run_id: str) -> str:
                     <td class="{'positive' if realized_b_total >= 0 else 'negative'}">{format_number(realized_b_total)}</td>
                 </tr>
                 <tr style="border-top: 2px solid #30363d; font-weight: bold;">
-                    <td colspan="2">合计</td>
+                    <td colspan="2">Total</td>
                     <td class="negative">-{format_number(grand_fees, 4)}</td>
                     <td class="{'positive' if grand_total >= 0 else 'negative'}">{format_number(grand_total)}</td>
                 </tr>

@@ -1,0 +1,65 @@
+﻿# OS / Editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+*.pyd
+*.dll
+.Python
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# Runtime data / DB
+data/**/*.sqlite3
+data/**/*.sqlite3-*
+data/**/*.db
+data/**/*.db-*
+data/**/*.duckdb
+data/**/*.parquet
+*.wal
+*.shm
+*.journal
+
+# Project cache
+live/__pycache__/
+config/__pycache__/
+strategies/**/__pycache__/
+utils/__pycache__/

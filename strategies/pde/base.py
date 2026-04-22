@@ -42,7 +42,18 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     max_A_trades: int = 6
     tail_start_threshold: float = 0.1
     phase_b_momentum_threshold_usd: float = 30.0  # $30 USD absolute price offset (bidirectional)
-    phase_b_max_token_price: float = 0.97        # Phase B 不入场的 token 价格上限（近解算无流动性）
+    phase_b_max_token_price: float = 0.75        # Phase B 不入场的 token 价格上限
+
+    # Phase B entry guards (pluggable)
+    phase_b_ev_filter_enabled: bool = True       # Guard: require minimum EV to enter Phase B
+    phase_b_min_ev: float = -0.05                # Minimum EV floor for Phase B entry
+    phase_b_hedge_max_price: float = 1.0         # Phase B hedge only if token price below this
+    phase_b_early_exit_enabled: bool = True      # Guard: exit Phase B before reserve window on SL
+    phase_b_early_exit_reserve_sec: float = 5.0  # Don't early-exit in last N seconds (hold for resolution)
+    phase_b_stop_loss_pct: float = 0.20          # Phase B percentage stop-loss threshold
+    phase_b_abs_stop_loss_enabled: bool = True   # Guard: absolute price floor stop-loss
+    phase_b_abs_stop_loss_price: float = 0.50    # Exit Phase B if token price drops below this
+
     take_profit_pct: float = 0.30
     stop_loss_pct: float = 0.20
     entry_retry_cooldown_sec: float = 1.0
@@ -56,7 +67,7 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     # Data refresh
     proactive_refresh_interval_min: float = 10.0
     flip_stats_refresh_minutes: int = 30
-    flip_stats_lookback: int = 200
+    flip_stats_lookback_windows: int = 96  # 96×5min=8h lookback, 0=disabled
     
     # PnL display
     pnl_display_interval_sec: float = 10.0

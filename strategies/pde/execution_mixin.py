@@ -902,7 +902,8 @@ class PDEExecutionMixin:
         return True
     
     def _maybe_exit_position(self, token_key: str, mark_price: float,
-                             bid: float, ask: float, ev: float, phase: str) -> bool:
+                             bid: float, ask: float, ev: float, phase: str,
+                             remaining: float = None) -> bool:
         """Evaluate exit conditions for open position."""
         pos = self.positions[token_key]
         if not pos['open']:
@@ -910,10 +911,43 @@ class PDEExecutionMixin:
 
         self._push_live_position_mark(token_key, mark_price)
 
-        # Phase B / B_HEDGE: hold to binary resolution unless phase_b_sl_tp_enabled=True
-        if pos.get('phase') in ('B', 'B_HEDGE'):
-            if not getattr(self.config, 'phase_b_sl_tp_enabled', False):
-                return False
+        # Phase B: modular exit guards (replaces monolithic phase_b_sl_tp_enabled flag)
+        if pos.get('phase') == 'B':
+            trigger_price = self._trigger_price_for_exit(pos, bid, ask, mark_price)
+            entry = float(pos.get('entry_price', 0.0))
+            if entry > 0:
+                reserve_sec = float(getattr(self.config, 'phase_b_early_exit_reserve_sec', 5.0))
+                in_reserve = remaining is None or remaining <= reserve_sec
+                pnl_pct = (trigger_price - entry) / entry  # buy side
+
+                # Guard A: absolute price floor (always active, even in reserve window)
+                if getattr(self.config, 'phase_b_abs_stop_loss_enabled', True):
+                    abs_floor = float(getattr(self.config, 'phase_b_abs_stop_loss_price', 0.50))
+                    if trigger_price < abs_floor:
+                        if self._close_position(token_key, trigger_price, f"exit_b_abs_sl_{token_key}"):
+                            self.log.info(
+                                f"[STOP-B] Abs floor hit {token_key.upper()} @ {trigger_price:.4f} "
+                                f"< {abs_floor:.2f} (pnl={pnl_pct:+.2%})"
+                            )
+                            return True
+                        return False
+
+                # Guard B: percentage stop-loss (skip in reserve window — hold for resolution)
+                if not in_reserve and getattr(self.config, 'phase_b_early_exit_enabled', True):
+                    sl_pct = float(getattr(self.config, 'phase_b_stop_loss_pct', 0.20))
+                    if pnl_pct <= -sl_pct:
+                        if self._close_position(token_key, trigger_price, f"exit_b_sl_{token_key}"):
+                            self.log.info(
+                                f"[STOP-B] SL hit {token_key.upper()} @ {trigger_price:.4f} "
+                                f"(pnl={pnl_pct:+.2%} <= -{sl_pct:.0%}, remaining={remaining:.1f}s)"
+                            )
+                            return True
+                        return False
+            return False
+
+        # Phase B_HEDGE: hold to binary resolution
+        if pos.get('phase') == 'B_HEDGE':
+            return False
 
         trigger_price = self._trigger_price_for_exit(pos, bid, ask, mark_price)
         entry = float(pos.get('entry_price', 0.0))

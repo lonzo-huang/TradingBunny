@@ -212,6 +212,7 @@ class PolymarketPDEStrategy(
         Returns a dict: {"applied": {...}, "rejected": {...}}.
         """
         allowed_casts = {
+            # Phase A
             'ev_threshold_A': float,
             'ev_entry_hysteresis': float,
             'ev_deadband': float,
@@ -221,9 +222,25 @@ class PolymarketPDEStrategy(
             'taker_fee_rate': float,
             'phase_a_min_token_price': float,
             'phase_a_max_token_price': float,
+            # Phase B entry guards
             'phase_b_start_sec': float,
             'phase_b_momentum_threshold_usd': float,
             'phase_b_max_token_price': float,
+            'phase_b_ev_filter_enabled': bool,
+            'phase_b_min_ev': float,
+            # Phase B exit guards
+            'phase_b_early_exit_enabled': bool,
+            'phase_b_early_exit_reserve_sec': float,
+            'phase_b_stop_loss_pct': float,
+            'phase_b_abs_stop_loss_enabled': bool,
+            'phase_b_abs_stop_loss_price': float,
+            # Phase B hedge guard
+            'phase_b_hedge_enabled': bool,
+            'phase_b_hedge_window_sec': float,
+            'phase_b_hedge_delta_threshold_usd': float,
+            'phase_b_hedge_size_pct': float,
+            'phase_b_hedge_max_price': float,
+            # General risk
             'take_profit_pct': float,
             'stop_loss_pct': float,
             'spread_tolerance': float,
@@ -232,6 +249,9 @@ class PolymarketPDEStrategy(
             'signal_eval_interval_sec': float,
             'entry_retry_cooldown_sec': float,
             'close_retry_interval_sec': float,
+            # Flip stats
+            'flip_stats_lookback_windows': int,
+            'flip_stats_refresh_minutes': int,
         }
         applied: dict = {}
         rejected: dict = {}
@@ -406,7 +426,7 @@ class PolymarketPDEStrategy(
 
         # Always evaluate exits first for already-open positions, regardless of phase signal state.
         if pos.get('open'):
-            if self._maybe_exit_position(token_key, mid, bid, ask, ev, phase):
+            if self._maybe_exit_position(token_key, mid, bid, ask, ev, phase, remaining=remaining):
                 return
 
         def _has_other_open_or_pending(tk: str) -> bool:
@@ -527,15 +547,22 @@ class PolymarketPDEStrategy(
                         self.log.debug(f"[TRADE] Skip {token_key} Phase B entry: other token has open/pending position")
                         return
 
-                    # ── Guard 1: token 价格过于极端（≥ max_token_price），沙盒/实盘均无对手方 ──
-                    phase_b_max_price = float(getattr(self.config, 'phase_b_max_token_price', 0.97))
+                    # ── Guard 1: token 价格过于极端（≥ max_token_price）──
+                    phase_b_max_price = float(getattr(self.config, 'phase_b_max_token_price', 0.75))
                     if mid >= phase_b_max_price:
                         self.log.info(
                             f"[SKIP] Phase B {token_key}: price={mid:.4f} ≥ max={phase_b_max_price:.4f}"
-                            f"（接近解算，无对手流动性，跳过）"
                         )
-                        # 不设 tail_trade_done，等价格回落后仍可尝试
                         return
+
+                    # ── Guard 2: EV 过滤（可关闭）──
+                    if getattr(self.config, 'phase_b_ev_filter_enabled', True):
+                        min_ev = float(getattr(self.config, 'phase_b_min_ev', -0.05))
+                        if ev < min_ev:
+                            self.log.info(
+                                f"[SKIP] Phase B {token_key}: ev={ev:.4f} < min_ev={min_ev:.4f}，EV不足跳过"
+                            )
+                            return
 
                     self.log.info(
                         f"[TRADE] Phase B momentum lock: {token_key} "
@@ -811,12 +838,15 @@ class PolymarketPDEStrategy(
         "phase_a_start_sec", "phase_a_end_sec",
         "phase_a_min_token_price", "phase_a_max_token_price", "phase_a_min_btc_delta",
         "max_A_trades",
-        # Phase B
+        # Phase B entry guards
         "phase_b_start_sec", "phase_b_momentum_threshold_usd", "phase_b_max_token_price",
-        # Phase B Hedge Guard
+        "phase_b_ev_filter_enabled", "phase_b_min_ev",
+        # Phase B exit guards
+        "phase_b_early_exit_enabled", "phase_b_early_exit_reserve_sec",
+        "phase_b_stop_loss_pct", "phase_b_abs_stop_loss_enabled", "phase_b_abs_stop_loss_price",
+        # Phase B hedge guard
         "phase_b_hedge_enabled", "phase_b_hedge_window_sec",
-        "phase_b_hedge_delta_threshold_usd", "phase_b_hedge_size_pct",
-        "phase_b_sl_tp_enabled",
+        "phase_b_hedge_delta_threshold_usd", "phase_b_hedge_size_pct", "phase_b_hedge_max_price",
         # Risk / execution
         "take_profit_pct", "stop_loss_pct",
         "taker_fee_rate", "spread_tolerance",
@@ -826,6 +856,8 @@ class PolymarketPDEStrategy(
         "btc_jump_threshold_bps",
         # Trade size
         "per_trade_usd",
+        # Flip stats
+        "flip_stats_lookback_windows", "flip_stats_refresh_minutes",
         # Debug
         "debug_raw_data", "debug_ws",
         # Hot-reload interval itself

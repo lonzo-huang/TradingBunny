@@ -43,6 +43,8 @@ DELTA_BINS = [
 ]
 
 LOOKBACK_MAP = {
+    '4h':  timedelta(hours=4),
+    '8h':  timedelta(hours=8),
     '12h': timedelta(hours=12),
     '24h': timedelta(hours=24),
     '1d':  timedelta(days=1),
@@ -253,6 +255,39 @@ def generate_flip_stats(lookback: str = "24h", symbol: str = "BTCUSDT",
     if verbose:
         print(f"  FlipStats: {len(flip_probs)} buckets from {n_windows} windows")
 
+    return flip_probs, sample_counts
+
+
+def generate_flip_stats_by_windows(
+    n_windows: int,
+    symbol: str = "BTCUSDT",
+    interval: str = "auto",
+    min_samples: int = 5,
+    verbose: bool = False,
+) -> tuple[dict, dict]:
+    """Fetch flip stats for the last n_windows × 5-minute windows.
+
+    Returns (flip_probs, sample_counts) with string keys matching _get_flip_bucket output.
+    """
+    td = timedelta(minutes=n_windows * WINDOW_SEC // 60)
+    if interval == "auto":
+        interval = "1s" if td <= timedelta(days=3) else "1m"
+
+    resolution = 1 if interval == "1s" else 60
+
+    now = datetime.now(timezone.utc)
+    start_ms = int((now - td).timestamp() * 1000)
+    end_ms = int(now.timestamp() * 1000)
+
+    if verbose:
+        print(f"  FlipStats: {symbol} last {n_windows} windows ({interval})")
+
+    klines = fetch_klines(symbol, interval, start_ms, end_ms, verbose=verbose)
+    if not klines:
+        return {}, {}
+
+    prices = klines_to_prices(klines, interval)
+    flip_probs, sample_counts, _ = compute_flip_stats(prices, resolution, min_samples, verbose)
     return flip_probs, sample_counts
 
 

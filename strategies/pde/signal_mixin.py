@@ -80,33 +80,38 @@ class PDESignalMixin:
     
     def _check_flip_stats_refresh(self) -> None:
         """Check if it's time to refresh flip stats."""
+        n_windows = int(getattr(self.config, 'flip_stats_lookback_windows', 96))
+        if n_windows <= 0:
+            return  # disabled
         if self.config.flip_stats_refresh_minutes <= 0:
             return
         if self.clock.timestamp() < self._next_flip_stats_refresh_ts:
             return
         if self._flip_stats_refresh_thread and self._flip_stats_refresh_thread.is_alive():
             return
-        
+
         self._flip_stats_refresh_thread = threading.Thread(
             target=self._refresh_flip_stats_worker, daemon=True
         )
         self._flip_stats_refresh_thread.start()
         self._schedule_flip_stats_refresh()
-    
+
     def _refresh_flip_stats_worker(self) -> None:
         """Background thread: fetch Binance data and compute flip probs."""
         try:
-            from utils.flip_stats_engine import generate_flip_stats, flip_probs_to_lookup
+            from utils.flip_stats_engine import generate_flip_stats_by_windows
 
-            lookback = self.config.flip_stats_lookback
-            stats, probs = generate_flip_stats(lookback=lookback)
+            n_windows = int(getattr(self.config, 'flip_stats_lookback_windows', 96))
+            if n_windows <= 0:
+                return
 
-            # Thread-safe update
+            flip_probs, sample_counts = generate_flip_stats_by_windows(n_windows, verbose=False)
+
             with self._get_flip_probs_lock():
-                self.flip_stats = stats
-                self.flip_probs = flip_probs_to_lookup(probs)
+                self.flip_stats = sample_counts
+                self.flip_probs = flip_probs  # string keys, matches _get_flip_bucket output
 
-            self.log.info(f"[OK] Refreshed flip stats: {len(self.flip_probs)} buckets")
+            self.log.info(f"[OK] Refreshed flip stats: {len(self.flip_probs)} buckets ({n_windows} windows)")
         except Exception as e:
             self.log.error(f"[ERROR] Flip stats refresh failed: {e}")
     
@@ -168,10 +173,14 @@ class PDESignalMixin:
         """
         # Get flip probability (thread-safe)
         p_flip = 0.0
-        if self.flip_probs:
-            bucket = self._get_flip_bucket(delta_pct, sigma, remaining_sec)
-            with self._get_flip_probs_lock():
-                p_flip = self.flip_probs.get(bucket, 0.0)
+        n_windows = int(getattr(self.config, 'flip_stats_lookback_windows', 96))
+        if n_windows > 0 and self.flip_probs:
+            btc_ref = self.btc_price or self.btc_start_price or 85000.0
+            delta_usd = abs(delta_pct) * btc_ref
+            bucket = self._get_flip_bucket(delta_usd, remaining_sec)
+            if bucket:
+                with self._get_flip_probs_lock():
+                    p_flip = self.flip_probs.get(bucket, 0.0)
 
         # Calculate EV
         if in_phase_a:
@@ -198,38 +207,18 @@ class PDESignalMixin:
             )
             return ev, p_flip, tail_cond
     
-    def _get_flip_bucket(self, delta_pct: float, sigma: float, remaining_sec: float = 300.0) -> str:
-        """Determine flip probability bucket based on delta, volatility, and time.
+    def _get_flip_bucket(self, delta_usd: float, remaining_sec: float) -> str:
+        """Determine flip probability bucket based on USD delta and remaining seconds.
 
-        Returns bucket key in format "{tau_low}_{tau_high}_{delta_low}_{delta_high}"
-        to match flip_stats.json keys.
+        Uses same TAU_BINS / DELTA_BINS as flip_stats_engine so keys always match.
+        Returns key like "0_10_5_10", or "" if out of range.
         """
-        # Map remaining time to tau buckets (in seconds)
-        if remaining_sec >= 240:
-            tau_bucket = "240_300"
-        elif remaining_sec >= 180:
-            tau_bucket = "180_240"
-        elif remaining_sec >= 120:
-            tau_bucket = "120_180"
-        elif remaining_sec >= 60:
-            tau_bucket = "60_120"
-        else:
-            tau_bucket = "0_60"
-
-        # Map delta to delta buckets (in basis points, 1bp = 0.01%)
-        delta_bps = abs(delta_pct) * 10000
-        if delta_bps < 5:
-            delta_bucket = "0_5"
-        elif delta_bps < 10:
-            delta_bucket = "5_10"
-        elif delta_bps < 20:
-            delta_bucket = "10_20"
-        elif delta_bps < 50:
-            delta_bucket = "20_50"
-        else:
-            delta_bucket = "50_inf"
-
-        return f"{tau_bucket}_{delta_bucket}"
+        from utils.flip_stats_engine import TAU_BINS, DELTA_BINS, _find_bin
+        tau_bin = _find_bin(remaining_sec, TAU_BINS)
+        delta_bin = _find_bin(abs(delta_usd), DELTA_BINS)
+        if tau_bin is None or delta_bin is None:
+            return ""
+        return f"{tau_bin[0]}_{tau_bin[1]}_{delta_bin[0]}_{delta_bin[1]}"
     
     def _ev_phase_a(self, p_t: float, market_price: float) -> float:
         """Phase A EV: p(t) - q(t) - legacy simple form, now unused.
@@ -284,8 +273,13 @@ class PDESignalMixin:
 
         ev = p_cont - price
         tail_condition = ev > 0.01
+        if getattr(self.config, 'debug_raw_data', False):
+            self.log.debug(
+                f"[EV-B] z={z_score:.3f} p_cont_z={p_cont_z:.4f} p_flip={p_flip:.4f} "
+                f"p_cont={p_cont:.4f} price={price:.4f} ev={ev:+.4f}"
+            )
         return ev, tail_condition
-    
+
     def _update_price_history(self, token_key: str, price: float) -> None:
         """Update price history for volatility calculation."""
         if self.price_history[token_key] is None:

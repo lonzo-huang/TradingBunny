@@ -123,10 +123,12 @@ class PolymarketPDEStrategy(
         # Start live server
         try:
             from utils.live_stream_server import LiveStreamServer
-            self.live_server = LiveStreamServer(host="0.0.0.0", port=8765)
+            import os as _os
+            _port = int(_os.getenv("LIVE_STREAM_PORT", "8765"))
+            self.live_server = LiveStreamServer(host="0.0.0.0", port=_port)
             self.live_server.set_param_update_handler(self._apply_runtime_params)
             self.live_server.start()
-            self.log.info("[OK] Live stream server started on :8765")
+            self.log.info(f"[OK] Live stream server started on :{_port}")
             
             # Push initial phase state so dashboard shows Round immediately
             if self.current_market_slug:

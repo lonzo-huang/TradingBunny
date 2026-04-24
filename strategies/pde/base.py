@@ -77,7 +77,6 @@ class PolymarketPDEStrategyConfig(StrategyConfig):
     phase_b_hedge_window_sec: float = 60.0            # Trigger only in last T seconds of round
     phase_b_hedge_delta_threshold_usd: float = 10.0   # Hedge if |delta_usd| drops below this
     phase_b_hedge_size_pct: float = 0.01              # Hedge size as fraction of Phase B notional
-    phase_b_sl_tp_enabled: bool = False               # False = hold B/B_HEDGE to binary resolution; True = apply SL/TP
 
     # Hot-reload
     hot_config_path: str = "config/pde_runtime_config.json"

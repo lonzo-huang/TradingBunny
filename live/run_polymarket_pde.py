@@ -159,6 +159,29 @@ class PDETradingBot:
             print("[BYE] 程序即将退出...")
 
 
+def _flush_sandbox_redis(trader_id: str = "POLYMARKET-SBX") -> None:
+    """
+    清除 sandbox trader 在 Redis 中的缓存状态。
+    每次 sandbox 启动前调用，确保从 starting_balances 重新初始化，
+    避免残留的虚拟账户/持仓/订单状态干扰新一轮运行。
+    Live 数据（POLYMARKET-001）不受影响。
+    """
+    redis_host = os.getenv("REDIS_HOST", "localhost")
+    redis_port = int(os.getenv("REDIS_PORT", 6379))
+    try:
+        import redis as redis_lib
+        r = redis_lib.Redis(host=redis_host, port=redis_port, socket_connect_timeout=2)
+        pattern = f"trader-{trader_id}:*"
+        keys = r.keys(pattern)
+        if keys:
+            r.delete(*keys)
+            print(f"[OK] 已清除 sandbox Redis 缓存: {len(keys)} 条 (trader_id={trader_id})")
+        else:
+            print(f"[OK] sandbox Redis 无历史缓存 (trader_id={trader_id})")
+    except Exception as e:
+        print(f"[WARN] 清除 sandbox Redis 缓存失败（可忽略）: {e}")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Polymarket PDE Strategy Bot")
     parser.add_argument(
@@ -170,6 +193,68 @@ async def main():
     args = parser.parse_args()
 
     print(f"[START] PDE 策略启动模式: {args.mode}")
+
+    # sandbox 每次启动前清除 Redis 旧状态，保证从 starting_balances 重新初始化
+    if args.mode == "sandbox":
+        sandbox_trader_id = os.getenv("NAUTILUS_TRADER_ID", "POLYMARKET-SBX")
+        _flush_sandbox_redis(sandbox_trader_id)
+
+    if args.mode == "both":
+        # 启动两个独立子进程：一个 sandbox，一个 live
+        # 各自拥有独立 TradingNode，避免 venue ID 冲突
+        # sandbox 使用不同的 trader_id (POLYMARKET-SBX)，防止 Redis 命名空间与 live 冲突
+        import subprocess
+        procs = []
+
+        # 给 sandbox 子进程注入不同的 trader_id 和 WebSocket 端口，避免与 live 进程冲突
+        sandbox_env = os.environ.copy()
+        sandbox_env["NAUTILUS_TRADER_ID"] = "POLYMARKET-SBX"
+        sandbox_env["LIVE_STREAM_PORT"] = "8768"   # live: WS=8765 HTTP=8766, sandbox: WS=8768 HTTP=8769
+
+        # 启动前预清除 sandbox Redis，子进程里的 _flush_sandbox_redis 也会执行一次（幂等）
+        _flush_sandbox_redis("POLYMARKET-SBX")
+
+        try:
+            sandbox_proc = subprocess.Popen(
+                [sys.executable, __file__, "--mode", "sandbox"],
+                env=sandbox_env,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            )
+            procs.append(("sandbox", sandbox_proc))
+            print(f"[OK] Sandbox 子进程已启动 (PID={sandbox_proc.pid}, WS=:8768/HTTP=:8769, trader=POLYMARKET-SBX)")
+
+            live_proc = subprocess.Popen(
+                [sys.executable, __file__, "--mode", "live"],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            )
+            procs.append(("live", live_proc))
+            print(f"[OK] Live 子进程已启动 (PID={live_proc.pid}, WS=:8765/HTTP=:8766, trader=POLYMARKET-001)")
+
+            print("[OK] 两个实例均已启动，按 Ctrl+C 同时停止所有进程...")
+
+            # 等待任意一个进程退出
+            loop = asyncio.get_running_loop()
+            while True:
+                await asyncio.sleep(1)
+                for name, proc in procs:
+                    if proc.poll() is not None:
+                        print(f"[WARN] {name} 进程已退出 (code={proc.returncode})，停止所有进程...")
+                        return
+
+        except KeyboardInterrupt:
+            print("\n[WARN] 收到停止信号，正在终止所有子进程...")
+        finally:
+            for name, proc in procs:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                        print(f"[OK] {name} 进程已停止")
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        print(f"[WARN] {name} 进程强制终止")
+        return
+
     config = configure_pde_node(execution_mode=args.mode)
     bot = PDETradingBot(config)
     await bot.run()

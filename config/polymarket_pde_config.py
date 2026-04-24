@@ -96,10 +96,9 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
         exec_clients["POLYMARKET"] = polymarket_exec_cfg
         print("📋 PDE Execution mode: POLYMARKET (live trading)")
     elif execution_mode == "both":
-        exec_clients["SANDBOX"] = sandbox_exec_cfg
-        exec_clients["POLYMARKET"] = polymarket_exec_cfg
-        reconciliation = False
-        print("📋 PDE Execution mode: BOTH (sandbox + live)")
+        # both 模式由 run_polymarket_pde.py 拆成两个独立子进程处理，不应直接调用此分支
+        raise ValueError("execution_mode='both' should not be passed to configure_pde_node directly. "
+                         "Use run_polymarket_pde.py --mode both which spawns separate sandbox/live processes.")
     else:
         raise ValueError(f"Invalid execution_mode: {execution_mode}")
 
@@ -115,6 +114,7 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
 
         exec_engine=LiveExecEngineConfig(
             reconciliation=reconciliation,
+            convert_quote_qty_to_base=False,
         ),
 
         cache=CacheConfig(
@@ -188,7 +188,7 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
                     # ===== 波动率与统计参数 =====
                     "volatility_window": 60,                # 波动率计算窗口（秒），60秒历史数据
                     "flip_stats_path": "config/flip_stats.json",  # 翻转统计文件路径
-                    "flip_stats_lookback": 200,             # 翻转统计回溯次数，最近200次
+                    "flip_stats_lookback_windows": 96,      # 翻转统计回溯窗口数（96×5min=8h），0=禁用
                     "flip_stats_refresh_minutes": 60,       # 翻转统计刷新间隔（分钟）
 
                     # ===== 调试与持久化参数 =====

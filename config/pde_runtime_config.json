@@ -3,7 +3,7 @@
   "_unsafe_params": "market_base_slug / market_interval_minutes / persistence_* / order_id_tag 不支持热加载。",
 
   "_section_risk": "===== 通用风控 =====",
-  "per_trade_usd": 100.0,
+  "per_trade_usd": 5.0,
   "take_profit_pct": 0.30,
   "stop_loss_pct": 0.20,
   "taker_fee_rate": 0.0072,
@@ -39,13 +39,12 @@
   "phase_b_hedge_delta_threshold_usd": 5.0,
   "phase_b_hedge_size_pct": 0.02,
   "phase_b_hedge_max_price": 0.15,
-  "phase_b_sl_tp_enabled": false,
 
   "_section_phase_b_exit": "===== Phase B Exit Guards（可插拔，独立开关）=====",
   "phase_b_early_exit_reserve_sec": 5.0,
-  "phase_b_abs_stop_loss_enabled": true,
+  "phase_b_abs_stop_loss_enabled": false,
   "phase_b_abs_stop_loss_price": 0.50,
-  "phase_b_early_exit_enabled": true,
+  "phase_b_early_exit_enabled": false,
   "phase_b_stop_loss_pct": 0.20,
 
   "_section_flip_stats": "===== 翻转概率统计 =====",

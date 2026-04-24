@@ -109,7 +109,7 @@ class LiveStreamServer:
         self._start_dashboard_http()
 
     def _start_dashboard_http(self):
-        """Start a tiny HTTP server to serve live-dashboard.html on port 8766."""
+        """Start a tiny HTTP server to serve live-dashboard.html on port (WS_port + 1)."""
         dashboard_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'monitoring')
         live_server = self
 
@@ -222,7 +222,7 @@ class LiveStreamServer:
                 self.end_headers()
                 self.wfile.write(payload)
 
-        http_port = self.port + 1  # 8766
+        http_port = self.port + 1  # WS+1 (live: 8766, sandbox: 8769)
         try:
             httpd = HTTPServer((self.host, http_port), _Handler)
             t = threading.Thread(target=httpd.serve_forever, daemon=True)

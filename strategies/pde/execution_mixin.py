@@ -226,6 +226,48 @@ class PDEExecutionMixin:
     def on_order_accepted(self, event) -> None:
         self._persist_order_event('order_accepted', event)
 
+    def on_order_denied(self, event) -> None:
+        """Handle pre-submission denial (e.g. risk engine or venue adapter rejects before send).
+        Mirrors on_order_rejected cleanup to prevent ghost open positions.
+        """
+        denied_id = str(getattr(event, 'client_order_id', ''))
+        order_info = self._order_map.pop(denied_id, None)
+        if not order_info:
+            return
+
+        token_key = order_info.get('token_key')
+        if not token_key or token_key not in self.positions:
+            return
+
+        pos = self.positions[token_key]
+        if order_info.get('type') == 'entry':
+            phase = pos.get('phase') or order_info.get('phase', 'A')
+            self.log.warning(
+                f"[CLEAR] Entry order denied (id={denied_id}), clearing local {token_key.upper()} position"
+            )
+            if phase == 'A' and self.A_trades > 0:
+                self.A_trades -= 1
+            elif phase == 'B':
+                if self.B_trades > 0:
+                    self.B_trades -= 1
+                self.tail_trade_done = False
+            elif phase == 'B_HEDGE':
+                hedge_done = getattr(self, '_phase_b_hedge_done', {})
+                hedge_done[token_key] = False
+            self._reset_local_position(token_key)
+            try:
+                self.position_gauge.labels(token=token_key).set(0.0)
+            except Exception:
+                pass
+            if self.live_server:
+                self.live_server.push_position(
+                    token=token_key, phase=phase,
+                    is_open=False, unrealized_pnl=0.0, quantity=0.0,
+                )
+        elif order_info.get('type') == 'close':
+            pos['close_pending'] = False
+            pos['close_requested_ts'] = 0.0
+
     def on_order_rejected(self, event) -> None:
         self._persist_order_event('order_rejected', event)
 
@@ -562,7 +604,8 @@ class PDEExecutionMixin:
         self.log.info(f"[OK] Close confirmed {token_key.upper()} gross={gross_realized:.4f} fee={total_fee:.6f} net={net_realized:.4f}")
     
     def _place_order(self, instrument: Any, side: OrderSide,
-                     price: float, size: float, label: str = "") -> tuple[bool, str]:
+                     price: float, size: float, label: str = "",
+                     quote_quantity: bool = False) -> tuple[bool, str]:
         """Place a market order via Strategy order_factory.
 
         Returns (success, client_order_id_str).
@@ -578,6 +621,7 @@ class PDEExecutionMixin:
                 instrument_id=instrument.id,
                 order_side=side,
                 quantity=qty,
+                quote_quantity=quote_quantity,
                 tags=[f"PDE_{label}"],
             )
             self.submit_order(order)
@@ -842,7 +886,11 @@ class PDEExecutionMixin:
             return False
         
         order_side = OrderSide.BUY if side == 'buy' else OrderSide.SELL
-        ok, order_id = self._place_order(inst, order_side, price, size, f"enter_{token_key}_{phase}")
+        if order_side == OrderSide.BUY:
+            # Polymarket BUY requires quote-denominated (USDC) quantity
+            ok, order_id = self._place_order(inst, order_side, price, size * price, f"enter_{token_key}_{phase}", quote_quantity=True)
+        else:
+            ok, order_id = self._place_order(inst, order_side, price, size, f"enter_{token_key}_{phase}")
         if not ok:
             if not self._last_entry_reject_reason:
                 self._last_entry_reject_reason = "place_order_failed"

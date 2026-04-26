@@ -115,6 +115,7 @@ def configure_pde_node(execution_mode: str = "sandbox") -> TradingNodeConfig:
         exec_engine=LiveExecEngineConfig(
             reconciliation=reconciliation,
             convert_quote_qty_to_base=False,
+            allow_overfills=True,   # quote_quantity=True 时 fill qty(tokens) > order qty(USDC)，非真实超额
         ),
 
         cache=CacheConfig(

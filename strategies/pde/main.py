@@ -672,6 +672,10 @@ class PolymarketPDEStrategy(
         hedge_usd = pos_notional * hedge_pct
         hedge_size = hedge_usd / opp_mid
 
+        if hedge_size <= 0:
+            self.log.warning(f"[HEDGE] Skipping hedge: pos_notional={pos_notional:.2f} → hedge_size={hedge_size:.4f} (position may not be tracked due to overfill)")
+            return
+
         self.log.info(
             f"[HEDGE] Phase B Hedge Guard: {token_key}({pos_side})→hedge {opposite_key} "
             f"delta_usd={delta_usd:+.2f} remaining={remaining:.1f}s "
